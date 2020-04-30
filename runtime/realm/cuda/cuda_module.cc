@@ -15,6 +15,8 @@
 
 #include "realm/cuda/cuda_module.h"
 
+#include "realm/cuda/nvml.h"
+
 #include "realm/tasks.h"
 #include "realm/logging.h"
 #include "realm/cmdline.h"
@@ -1158,14 +1160,26 @@ namespace Realm {
 	//r->add_dma_channel(new GPUDMAChannel_P2P(this));
 
 	// TODO: move into the dma channels themselves
-	for(std::set<Memory>::const_iterator it = peer_fbs.begin();
+	for(std::map<Memory, nvml::Distance>::const_iterator it = peer_fbs.begin();
 	    it != peer_fbs.end();
 	    ++it) {
+
+    nvml::Distance distance = it->second;
+
 	  Machine::MemoryMemoryAffinity mma;
 	  mma.m1 = fbmem->me;
-	  mma.m2 = *it;
-	  mma.bandwidth = 10; // assuming pcie, this should be ~half the bw and
-	  mma.latency = 400;  // ~twice the latency as zcmem
+	  mma.m2 = it->first;
+    if (distance.kind == nvml::DistanceKind::NVLINK_CLOSE) {
+      mma.bandwidth = nvml::NVLINK_CLOSE_BANDWIDTH; 
+	    mma.latency = nvml::NVLINK_CLOSE_LATENCY; 
+    } else if (distance.kind == nvml::DistanceKind::NVLINK_FAR) {
+      mma.bandwidth = nvml::NVLINK_FAR_BANDWIDTH; 
+	    mma.latency = nvml::NVLINK_FAR_LATENCY; 
+    } else { // assume PCIe
+	    mma.bandwidth = 10; // assuming pcie, this should be ~half the bw and
+	    mma.latency = 400;  // ~twice the latency as zcmem
+    }
+
 	  r->add_mem_mem_affinity(mma);
 	}
       }
@@ -2555,14 +2569,34 @@ namespace Realm {
 	  CHECK_CU( cuCtxEnablePeerAccess((*it)->context, 0) );
 	}
 	log_gpu.info() << "peer access enabled from GPU " << p << " to FB " << (*it)->fbmem->me;
-	peer_fbs.insert((*it)->fbmem->me);
+	peer_fbs[(*it)->fbmem->me] = info->distances[(*it)->info->device];
+
 
 	{
 	  Machine::ProcessorMemoryAffinity pma;
 	  pma.p = p;
 	  pma.m = (*it)->fbmem->me;
-	  pma.bandwidth = 10; // assuming pcie, this should be ~half the bw and
-	  pma.latency = 400;  // ~twice the latency as zcmem
+
+    nvml::Distance distance = nvml::Distance::UNKNOWN_DISTANCE;
+    if (info->distances.count((*it)->info->device)) {
+      distance = info->distances[(*it)->info->device];
+    }
+
+    if (distance.kind == nvml::DistanceKind::NVLINK_CLOSE) {
+      // TODO: be smarter about nvlink version and width
+	    pma.bandwidth = nvml::NVLINK_CLOSE_BANDWIDTH; 
+	    pma.latency = nvml::NVLINK_CLOSE_LATENCY;
+    } else if (distance.kind == nvml::DistanceKind::NVLINK_FAR) {
+      // TODO: be smarter about nvlink version and width
+	    pma.bandwidth = nvml::NVLINK_FAR_BANDWIDTH; 
+	    pma.latency = nvml::NVLINK_FAR_LATENCY;
+    } else {
+      // assuming pcie, this should be ~half the bw and
+	    pma.bandwidth = 10; 
+	    pma.latency = 400;  // ~twice the latency as zcmem
+    }
+
+
 	  runtime->add_proc_mem_affinity(pma);
 	}
       }
@@ -2851,8 +2885,32 @@ namespace Realm {
 			       << " to device " << (*it2)->index;
 		(*it1)->peers.insert((*it2)->device);
 	      }
-	    }
+	}
+
+        {
+          // make sure the Nvidia Management Library is initialized
+          nvml::lazy_init();
+
+          // get distance (all pairs)
+          for(std::vector<GPUInfo *>::iterator it1 = infos.begin();
+              it1 != infos.end();
+              it1++){
+            for(std::vector<GPUInfo *>::iterator it2 = infos.begin();
+                it2 != infos.end();
+                it2++){
+              // if (it1 != it2) {
+                const int src = (*it1)->index;
+                const int dst = (*it2)->index;
+                nvml::Distance dist = nvml::get_gpu_gpu_distance(src, dst);
+                log_gpu.info() << "gpu " << src << " to " << dst << " distance: " << dist;
+                infos[src]->distances[(*it2)->device] = dist;
+              // }
+            }
+          }
+        }
       }
+
+      
 
       CudaModule *m = new CudaModule;
 

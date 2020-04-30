@@ -31,6 +31,8 @@
 #include "realm/proc_impl.h"
 #include "realm/mem_impl.h"
 
+#include "realm/cuda/nvml.h"
+
 #define CHECK_CUDART(cmd) do { \
   cudaError_t ret = (cmd); \
   if(ret != cudaSuccess) { \
@@ -138,6 +140,7 @@ namespace Realm {
       int compute_major, compute_minor;
       size_t total_mem;
       std::set<CUdevice> peers;  // other GPUs we can do p2p copies with
+      std::map<CUdevice, nvml::Distance> distances; // distance to other GPUs
     };
 
     enum GPUMemcpyKind {
@@ -577,8 +580,8 @@ namespace Realm {
       // which system memories have been registered and can be used for cuMemcpyAsync
       std::set<Memory> pinned_sysmems;
 
-      // which other FBs we have peer access to
-      std::set<Memory> peer_fbs;
+      // which other FBs we have peer access to, and how far away they are
+      std::map<Memory, nvml::Distance> peer_fbs;
 
       // streams for different copy types and a pile for actual tasks
       GPUStream *host_to_device_stream;

@@ -74,6 +74,7 @@ list(APPEND REALM_SRC
 if(Legion_USE_CUDA)
   list(APPEND REALM_SRC
     realm/cuda/cuda_module.h    realm/cuda/cuda_module.cc
+    realm/cuda/nvml.h           realm/cuda/nvml.cc
   )
   if(REALM_USE_CUDART_HIJACK)
     list(APPEND REALM_SRC
@@ -478,6 +479,7 @@ if(Legion_USE_CUDA)
     RELEASE -O2
     RELWITHDEBINFO -g -O2)
   target_sources(LegionRuntime PRIVATE ${LEGION_CUDA_OBJS})
+  target_link_libraries(RealmRuntime PUBLIC nvidia-ml)
 endif()
 target_link_libraries(LegionRuntime PUBLIC RealmRuntime)
 if(Legion_USE_ZLIB)

@@ -30,7 +30,7 @@ void lazy_init() {
 /*static*/ const Distance Distance::UNKNOWN_DISTANCE = {};
 
 Distance get_gpu_gpu_distance(int src, int dst) {
-  std::cerr << src << " " << dst << "\n";
+  //std::cerr << "get_gpu_gpu_distance() " << src << " " << dst << "\n";
 
   Distance distance = Distance::UNKNOWN_DISTANCE;
 
@@ -39,7 +39,6 @@ Distance get_gpu_gpu_distance(int src, int dst) {
     return distance;
   }
 
-  // get NVML device handles
   nvmlDevice_t srcDev, dstDev;
   NVML(nvmlDeviceGetHandleByIndex(src, &srcDev));
   NVML(nvmlDeviceGetHandleByIndex(dst, &dstDev));
@@ -49,6 +48,10 @@ Distance get_gpu_gpu_distance(int src, int dst) {
   distance.width = 0;
   distance.version = 0;
 
+  /* Check all NvLinks. If the GPUs are directly connected, then count the number of links
+  If the src GPU has an NvLink but is not directly connected to the dst, then assume
+  there is a faster-than-PCIe path (NVLINK_FAR),
+  */
   for (int link = 0; link < 6; ++link) {
     nvmlPciInfo_t pci;
     nvmlReturn_t ret = nvmlDeviceGetNvLinkRemotePciInfo(srcDev, link, &pci);
@@ -71,8 +74,6 @@ Distance get_gpu_gpu_distance(int src, int dst) {
               NVML(ret);
             }
           }
-
-          return distance;
         }
       } else if (NVML_ERROR_NOT_FOUND == getRet) {
         // not attached to a GPU
@@ -98,6 +99,10 @@ Distance get_gpu_gpu_distance(int src, int dst) {
     } else {
       NVML(ret);
     }
+  }
+
+  if (DistanceKind::NVLINK_FAR == distance.kind || DistanceKind::NVLINK_CLOSE == distance.kind) {
+    return distance;
   }
 
   // no nvlink, try other methods

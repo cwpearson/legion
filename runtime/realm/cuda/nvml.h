@@ -1,49 +1,18 @@
 #ifndef REALM_CUDA_NVML_H
 #define REALM_CUDA_NVML_H
 
-#include <map>
-#include <ostream>
-
-#include <nvml.h>
-
+#include "realm/cuda/system.h"
 
 namespace Realm {
 namespace nvml {
 
-
-enum DistanceKind {
-    UNKNOWN = 0,
-    SAME, // same device NVML_TOPOLOGY_INTERNAL
-    NVLINK_CLOSE, // direct NvLink between GPUs
-    NVLINK_FAR, // Path includes NvLink and CPU SMP bus, but no PCIe
-    PCIE_CLOSE, // NVML_TOPOLOGY_SINGLE, _MULTIPLE, or _HOSTBRIDGE
-    PCIE_FAR, // NVML_TOPOLOGY_NODE and _SYSTEM
-};
-
-static const int NVLINK_CLOSE_LATENCY = 260;
-static const int NVLINK_CLOSE_BANDWIDTH = 16;
-static const int NVLINK_FAR_LATENCY = 320;
-static const int NVLINK_FAR_BANDWIDTH = 13;
-
-struct Distance {
-    DistanceKind kind;
-    unsigned int version; // nvlink version
-    unsigned int width; // number of bonded lanes
-
-    static const Distance UNKNOWN_DISTANCE;
-
-    friend std::ostream& operator<<(std::ostream &os, const Distance &d);
-};
-
-/* Initialize the nvml environment, if it hasn't been already
-  Should be called before any other functions
+/* Add gpus to sys
 */
-void lazy_init();
+void add_gpus(Realm::system::System &sys);
 
-
-/* Return the link between GPU src and dst
+/* Add links for gpus found in sys
 */
-Distance get_gpu_gpu_distance(int src, int dst);
+void add_nvlinks(system::System &sys);
 
 
 } // namespace nvml

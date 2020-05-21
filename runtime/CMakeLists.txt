@@ -74,7 +74,10 @@ list(APPEND REALM_SRC
 if(Legion_USE_CUDA)
   list(APPEND REALM_SRC
     realm/cuda/cuda_module.h    realm/cuda/cuda_module.cc
+    realm/cuda/linux.h          realm/cuda/linux.cc
     realm/cuda/nvml.h           realm/cuda/nvml.cc
+    realm/cuda/system.h         realm/cuda/system.cc
+    realm/cuda/topology.h       realm/cuda/topology.cc
   )
   if(REALM_USE_CUDART_HIJACK)
     list(APPEND REALM_SRC

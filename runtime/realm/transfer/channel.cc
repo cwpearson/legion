@@ -3199,7 +3199,7 @@ namespace Realm {
 	    // just do paths to peers - they'll do the other side
 	    unsigned bw = 0; // TODO
 	    unsigned latency = 0;
-	    for(std::map<Memory, nvml::Distance>::const_iterator it = src_gpu->peer_fbs.begin();
+	    for(std::map<Memory, topology::Distance>::const_iterator it = src_gpu->peer_fbs.begin();
 		it != src_gpu->peer_fbs.end();
 		++it)
 	      add_path(fbm, it->first, bw, latency, false, false);

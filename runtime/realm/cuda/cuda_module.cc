@@ -15,7 +15,7 @@
 
 #include "realm/cuda/cuda_module.h"
 
-#include "realm/cuda/nvml.h"
+#include "realm/cuda/topology.h"
 
 #include "realm/tasks.h"
 #include "realm/logging.h"
@@ -1160,21 +1160,21 @@ namespace Realm {
 	//r->add_dma_channel(new GPUDMAChannel_P2P(this));
 
 	// TODO: move into the dma channels themselves
-	for(std::map<Memory, nvml::Distance>::const_iterator it = peer_fbs.begin();
+	for(std::map<Memory, topology::Distance>::const_iterator it = peer_fbs.begin();
 	    it != peer_fbs.end();
 	    ++it) {
 
-    nvml::Distance distance = it->second;
+    topology::Distance distance = it->second;
 
 	  Machine::MemoryMemoryAffinity mma;
 	  mma.m1 = fbmem->me;
 	  mma.m2 = it->first;
-    if (distance.kind == nvml::DistanceKind::NVLINK_CLOSE) {
-      mma.bandwidth = nvml::NVLINK_CLOSE_BANDWIDTH; 
-	    mma.latency = nvml::NVLINK_CLOSE_LATENCY; 
-    } else if (distance.kind == nvml::DistanceKind::NVLINK_FAR) {
-      mma.bandwidth = nvml::NVLINK_FAR_BANDWIDTH; 
-	    mma.latency = nvml::NVLINK_FAR_LATENCY; 
+    if (distance.kind == topology::DistanceKind::NVLINK_CLOSE) {
+      mma.bandwidth = topology::NVLINK_CLOSE_BANDWIDTH; 
+	    mma.latency = topology::NVLINK_CLOSE_LATENCY; 
+    } else if (distance.kind == topology::DistanceKind::NVLINK_FAR) {
+      mma.bandwidth = topology::NVLINK_FAR_BANDWIDTH; 
+	    mma.latency = topology::NVLINK_FAR_LATENCY; 
     } else { // assume PCIe
 	    mma.bandwidth = 10; // assuming pcie, this should be ~half the bw and
 	    mma.latency = 400;  // ~twice the latency as zcmem
@@ -2577,19 +2577,19 @@ namespace Realm {
 	  pma.p = p;
 	  pma.m = (*it)->fbmem->me;
 
-    nvml::Distance distance = nvml::Distance::UNKNOWN_DISTANCE;
+    topology::Distance distance = topology::Distance::UNKNOWN_DISTANCE;
     if (info->distances.count((*it)->info->device)) {
       distance = info->distances[(*it)->info->device];
     }
 
-    if (distance.kind == nvml::DistanceKind::NVLINK_CLOSE) {
+    if (distance.kind == topology::DistanceKind::NVLINK_CLOSE) {
       // TODO: be smarter about nvlink version and width
-	    pma.bandwidth = nvml::NVLINK_CLOSE_BANDWIDTH; 
-	    pma.latency = nvml::NVLINK_CLOSE_LATENCY;
-    } else if (distance.kind == nvml::DistanceKind::NVLINK_FAR) {
+	    pma.bandwidth = topology::NVLINK_CLOSE_BANDWIDTH; 
+	    pma.latency = topology::NVLINK_CLOSE_LATENCY;
+    } else if (distance.kind == topology::DistanceKind::NVLINK_FAR) {
       // TODO: be smarter about nvlink version and width
-	    pma.bandwidth = nvml::NVLINK_FAR_BANDWIDTH; 
-	    pma.latency = nvml::NVLINK_FAR_LATENCY;
+	    pma.bandwidth = topology::NVLINK_FAR_BANDWIDTH; 
+	    pma.latency = topology::NVLINK_FAR_LATENCY;
     } else {
       // assuming pcie, this should be ~half the bw and
 	    pma.bandwidth = 10; 
@@ -2888,8 +2888,8 @@ namespace Realm {
 	}
 
         {
-          // make sure the Nvidia Management Library is initialized
-          nvml::lazy_init();
+          // TODO::TOPOLOGY
+          topology::lazy_init();
 
           // get distance (all pairs)
           for(std::vector<GPUInfo *>::iterator it1 = infos.begin();
@@ -2901,7 +2901,7 @@ namespace Realm {
               // if (it1 != it2) {
                 const int src = (*it1)->index;
                 const int dst = (*it2)->index;
-                nvml::Distance dist = nvml::get_gpu_gpu_distance(src, dst);
+                topology::Distance dist = topology::get_gpu_gpu_distance(src, dst);
                 log_gpu.info() << "gpu " << src << " to " << dst << " distance: " << dist;
                 infos[src]->distances[(*it2)->device] = dist;
               // }

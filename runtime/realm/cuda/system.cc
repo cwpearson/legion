@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 
 #include "realm/cuda/linux.h"
 #include "realm/cuda/nvml.h"
@@ -32,11 +33,12 @@ void cpuset_set(int i, CpuSet *result) {
   size_t field = i / CPUSET_FIELD_BITS;
   size_t bit = i % CPUSET_FIELD_BITS;
   if (field < 32) {
-    (*result)[field] |= (1 << bit);
+    (*result)[field] |= (1ul << bit);
   }
 }
 
 bool cpuset_get(int i, const CpuSet &s) {
+  assert(i < sizeof(CpuSet) * 8);
   size_t field = i / CPUSET_FIELD_BITS; // bits in a field
   size_t bit = i % CPUSET_FIELD_BITS;
   if (field < 32) {
@@ -57,6 +59,8 @@ int cpuset_count(const CpuSet &s) {
   }
   return count;
 }
+
+Link::Link() : u(nullptr), v(nullptr) {}
 
 System::~System() {
   for (size_t i = 0; i < nodes.size(); ++i) {
@@ -111,7 +115,7 @@ std::vector<Link*> System::get_links(const Node *n) const {
 Link* System::get_link(const Node *u, const Node *v) const {
   std::vector<Link*> ret;
   for (Link *link : links) {
-    if (link->u == u || link->v == v) {
+    if (link->u == u && link->v == v) {
       ret.push_back(link);
     }
   }

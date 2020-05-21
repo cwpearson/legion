@@ -60,6 +60,7 @@ static int read_cpulist_cpuset(CpuSet *result, const char *suffix) {
   std::vector<std::string> ranges = tokens(str, ',');
 
   for (auto &r : ranges) {
+    log_linux.spew() << "range " << r;
     if (!cpuset_set_from_range(result, r)) {
       return 1;
     }
@@ -104,7 +105,10 @@ void add_cpus(system::System &sys) {
 
   // get present cpus
   CpuSet present = {};
+  assert(0 == cpuset_count(present));
   get_present_cpus(&present);
+  
+  log_linux.info("found %d present cpus", cpuset_count(present));
 
   // figure out what CPUs are in each socket
   std::map<int, CpuSet> sockets;
@@ -118,14 +122,11 @@ void add_cpus(system::System &sys) {
     }
   }
 
-  for (auto &kv : sockets) {
-      log_linux.info() << "socket " << kv.first << " ncpus=" << cpuset_count(kv.second);
-  }
-
   // if we can't detect any sockets for some reason,
   // just put all CPUs in one socket
   if (sockets.empty()) {
-    Node *socket = new Node;
+    log_linux.warning() << "couldn't find any sockets.";
+    	Node *socket = new Node;
     socket->type = system::NodeType::cpu;
 #ifdef __amd64__
     socket->cpu.vendor = system::Vendor::x86;
@@ -136,6 +137,8 @@ void add_cpus(system::System &sys) {
     CpuSet full = {};
     cpuset_fill(&full);
     std::memcpy(socket->cpu.cpuset, full, sizeof(full));
+    log_linux.info() << "add socket " << socket->id << " ncpus=" << cpuset_count(socket->cpu.cpuset);
+    sys.add_node(socket);
   }
 
   for (auto &kv : sockets) {
@@ -145,6 +148,8 @@ void add_cpus(system::System &sys) {
       socket->type = system::NodeType::cpu;
       socket->id = kv.first;
       std::memcpy(socket->cpu.cpuset, kv.second, sizeof(kv.second));
+      log_linux.info() << "add socket " << socket->id << " ncpus=" << cpuset_count(socket->cpu.cpuset);
+      sys.add_node(socket);
     }
   }
 }

@@ -15,7 +15,7 @@
 namespace Realm {
 namespace nvml {
 
-Logger log_nvml("nvml");
+Logger log("nvml");
 
 // TODO: integrate with Legion error handling
 void checkNvml(nvmlReturn_t result, const char *file, const int line) {
@@ -54,7 +54,7 @@ void add_gpus(system::System &sys) {
       gpu->id = di;
       sys.add_node(gpu);
       assert(sys.get_gpu(di));
-      log_nvml.debug() << " added GPU " << di;
+      log.debug() << " added GPU " << di;
     }
   }
 }
@@ -68,7 +68,7 @@ void add_nvlinks(system::System &sys, int srcId) {
 
   system::Node *gpu = sys.get_gpu(srcId);
   if (!gpu) {
-    log_nvml.error("looking for GPU %d but wasn't found in system", srcId);
+    log.error("looking for GPU %d but wasn't found in system", srcId);
   }
   assert(gpu);
 
@@ -90,6 +90,9 @@ void add_nvlinks(system::System &sys, int srcId) {
 
       if (NVML_SUCCESS == getRet) { // remote is a GPU
 
+          log.info(
+              "GPU %d link %d is an NVML device", srcId,
+              li);
         // the remote is an NVML device, should have already been added to the
         // system
         unsigned int remoteId;
@@ -106,6 +109,7 @@ void add_nvlinks(system::System &sys, int srcId) {
             assert(link->type == system::LinkType::nvlink);
             assert(link->nvlink.version > 0);
             link->nvlink.width += 1;
+	    log.info("nvlink gpus %d-%d, width=%d", gpu->id, remoteGpu->id, link->nvlink.width); 
           } else {
             link = new system::Link;
             link->type = system::LinkType::nvlink;
@@ -113,6 +117,7 @@ void add_nvlinks(system::System &sys, int srcId) {
             unsigned int version;
             NVML(nvmlDeviceGetNvLinkVersion(dev, li, &version));
             link->nvlink.version = version;
+	    log.info("added nvlink gpus %d-%d, width=%d version=%d", gpu->id, remoteGpu->id, link->nvlink.width, link->nvlink.version); 
             sys.add_link(gpu, remoteGpu, link);
           }
         }
@@ -120,13 +125,12 @@ void add_nvlinks(system::System &sys, int srcId) {
                  getRet) { // nvmlDeviceGetNvLinkRemotePciInfo
         // the remote is not a GPU
 
-        const unsigned short pciVendorId = (pci.pciDeviceId >> 16) & 0xFF;
-        const unsigned short pciDeviceId = pci.pciDeviceId & 0xFF;
-
+        const unsigned short pciVendorId = (pci.pciDeviceId >> 16) & 0xFFFF;
+        const unsigned short pciDeviceId = pci.pciDeviceId & 0xFFFF;
+        // TODO: I think the vendor ID should be 0x1041, but NVML reports 0, so ignore for now
         // Iremote is an IBM emulated NvLink Bridge
-        if (0x1041 == pciVendorId && 0x04ea == pciDeviceId) {
-
-          log_nvml.info(
+        if (0x04ea == pciDeviceId) {
+          log.info(
               "GPU %d link %d is an IBM emulated NvLink Bridge (04ea)", srcId,
               li);
 
@@ -136,20 +140,22 @@ void add_nvlinks(system::System &sys, int srcId) {
 
           // get the sockets we have affinity for
           std::set<system::Node *> sockets;
-          for (size_t f = 0; f < system::CpuSetSize; ++f) {
-            for (size_t b = 0; b < sizeof(cpuset[0]) * 8; ++b) {
-              if ((cpuset[f] >> b) & 0x1) {
+	  for (size_t i = 0; i < system::CpuSetMaxCpus; ++i) {
+            if (system::cpuset_get(i, cpuset)) {
                 system::Node *socket =
-                    sys.get_socket_for_cpu(f * sizeof(cpuset[0]) * 8 + b);
+                    sys.get_socket_for_cpu(i);
+		if (!socket) {
+                  log.error("couldn't get socket for cpu %lu", i);
+		}
                 assert(socket);
                 sockets.insert(socket);
-              }
-            }
-          }
+
+	    }
+	  }
           assert(sockets.size() == 1);
           system::Node *cpu = *sockets.begin();
-
-          system::Link *link = sys.get_link(gpu, cpu);
+          
+		  system::Link *link = sys.get_link(gpu, cpu);
           if (!link) {
             link = new system::Link;
             link->type = system::LinkType::nvlink;
@@ -161,9 +167,11 @@ void add_nvlinks(system::System &sys, int srcId) {
             sys.add_link(gpu, cpu, link);
           } else {
             link->nvlink.width += 1;
+	    log.error("link bw gpu %d and socket %d width=%d", gpu->id, cpu->id, link->nvlink.width);
           }
         } else { // not an IBM emulated bridge
-          assert(false && "unexpected remote nvlink device");
+          log.error() << "unexpected remote nvlink device vendor=" << std::hex << (pci.pciDeviceId >> 16) << " device=" << (pci.pciDeviceId & 0xFFFF);
+	  assert(false);
         }
       } else { // nvmlDeviceGetNvLinkRemotePciInfo
         NVML(getRet);
@@ -176,14 +184,14 @@ void add_nvlinks(system::System &sys, int srcId) {
       continue;
     } else if (NVML_ERROR_NOT_SUPPORTED == ret) {
       // device does not support
-      log_nvml.debug("GPU %d does not support nvlink", srcId);
+      log.debug("GPU %d does not support nvlink", srcId);
       break;
     } else {
       NVML(ret);
     }
   }
 
-  log_nvml.debug("finished add_nvlinks(..., %d)" , srcId);
+  log.debug("finished add_nvlinks(..., %d)" , srcId);
 }
 
 void add_nvlinks(system::System &sys) {

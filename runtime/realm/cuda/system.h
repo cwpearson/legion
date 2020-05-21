@@ -15,6 +15,7 @@ namespace system {
 
 typedef unsigned long CpuSet[32];
 static const unsigned CpuSetSize = 32;
+static const unsigned CpuSetMaxCpus = 32 * sizeof(unsigned long) * 8;
 
 /* zero a CpuSet
  */
@@ -59,6 +60,7 @@ enum NodeType {
 
 struct Node;
 struct Link {
+  Link();
   int type;
   Node *u;
   Node *v;

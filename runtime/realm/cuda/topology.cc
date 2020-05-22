@@ -74,7 +74,7 @@ Distance get_gpu_gpu_distance(int srcId, int dstId) {
     return d;
   }
 
-  // out system does not explore the PCIe tree yet, so just return unknown otherwise
+  // TODO: no PCIe tree yet, so just return unknown otherwise
 
   return Distance::UNKNOWN_DISTANCE;
 

@@ -10,10 +10,14 @@ namespace nvml {
 */
 void add_gpus(Realm::system::System &sys);
 
-/* Add links for gpus found in sys
+/* Add nvlinks to system
 */
 void add_nvlinks(system::System &sys);
 
+/* Add PCIe links to system
+*/
+
+void add_pci(system::System &sys);
 
 } // namespace nvml
 } // namespace Realm

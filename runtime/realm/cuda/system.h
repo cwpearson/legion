@@ -13,9 +13,10 @@ namespace Realm {
 namespace system {
 
 
-typedef unsigned long CpuSet[32];
+typedef unsigned long CpuSetField;
+typedef CpuSetField CpuSet[32];
 static const unsigned CpuSetSize = 32;
-static const unsigned CpuSetMaxCpus = 32 * sizeof(unsigned long) * 8;
+static const unsigned CpuSetMaxCpus = 32 * sizeof(CpuSetField) * 8;
 
 /* zero a CpuSet
  */
@@ -37,7 +38,9 @@ bool cpuset_get(int i, const CpuSet &s);
  */
 int cpuset_count(const CpuSet &s);
 
-
+/* fill `i` with the intersection of `x` and `y`
+*/
+void cpuset_intersection(CpuSet *i, const CpuSet &x, const CpuSet &y);
 
 
 enum LinkType {
@@ -55,7 +58,19 @@ enum NodeType {
   cpu,
   gpu,
   nvswitch,
-  pcitree,
+};
+
+/* placeholder link kind representing one or more PCI link traversals
+   with full PCI tree enumeration, this can be removed
+*/
+enum PciAncestor {
+  unknown,
+  internal,
+  single,
+  multiple,
+  hostbridge,
+  node,
+  system,
 };
 
 struct Node;
@@ -69,6 +84,9 @@ struct Link {
       unsigned int version;
       int width;
     } nvlink;
+    struct {
+      PciAncestor ancestor;
+    } pci;
   };
 };
 
@@ -118,6 +136,9 @@ public:
    */
   Node *get_socket_for_cpu(int cpu) const;
  
+
+  std::vector<Node *>get_sockets_for_cpuset(const CpuSet &s) const;
+
   /* return all socket nodes
   */
   std::vector<Node *> get_sockets() const;

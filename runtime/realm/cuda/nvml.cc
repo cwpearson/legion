@@ -211,8 +211,17 @@ void add_pci(system::System &sys) {
     for (unsigned dst = 0; dst < count; ++dst) {
 
       if (src != dst) {
-        Node *srcGpu;
-        Node *dstGpu;
+        Node *srcGpu = sys.get_gpu(src);
+        Node *dstGpu = sys.get_gpu(dst);
+	if (!srcGpu) {
+          log.error("didn't find GPU %d in system", src);
+	  continue;
+	}
+	if (!srcGpu) {
+          log.error("didn't find GPU %d in system", dst);
+	  continue;
+	}
+
 
         std::vector<system::System::Path> paths = sys.paths(srcGpu, dstGpu);
 
@@ -271,7 +280,10 @@ void add_pci(system::System &sys) {
     std::vector<Node *> sockets = sys.get_sockets_for_cpuset(cpuset);
 
     Node *gpu = sys.get_gpu(d);
-    assert(gpu);
+    if (!gpu) {
+      log.error("didn't find GPU %d in system", d);
+      continue;
+    }
 
     // attach to sockets
     for (Node *socket : sockets) {

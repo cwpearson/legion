@@ -171,7 +171,7 @@ namespace Legion {
                                              collect_event, applied_events, 
                                              trace_info, source);
       if (ready_event.exists())
-        Runtime::trigger_event(ready_event, pre);
+        Runtime::trigger_event(&trace_info, ready_event, pre);
       if (!applied_events.empty())
       {
         const RtEvent precondition = Runtime::merge_events(applied_events);
@@ -2237,7 +2237,8 @@ namespace Legion {
       const FieldMask overlap = copy_mask & mask;
       if (!overlap)
         return false;
-      const RegionUsage usage(reading ? READ_ONLY : READ_WRITE, EXCLUSIVE, 0);
+      const RegionUsage usage(reading ? LEGION_READ_ONLY : LEGION_READ_WRITE, 
+                              LEGION_EXCLUSIVE, 0);
       view->add_internal_copy_user(usage, copy_expr, overlap, term_event,
                        collect_event, op_id, index, false/*trace recording*/);
       copy_mask -= overlap;
@@ -2470,7 +2471,7 @@ namespace Legion {
           // If we're not the logical owner send a message there 
           // to do the analysis and provide a user event to trigger
           // with the precondition
-          ready_event = Runtime::create_ap_user_event();
+          ready_event = Runtime::create_ap_user_event(&trace_info);
           RtUserEvent applied_event = Runtime::create_rt_user_event();
           Serializer rez;
           {
@@ -2796,7 +2797,8 @@ namespace Legion {
         const ApEvent start_use_event = manager->get_use_event();
         if (start_use_event.exists())
           preconditions[start_use_event].insert(copy_expr, copy_mask);
-        const RegionUsage usage(reading ? READ_ONLY : READ_WRITE, EXCLUSIVE, 0);
+        const RegionUsage usage(reading ? LEGION_READ_ONLY : LEGION_READ_WRITE,
+                                LEGION_EXCLUSIVE, 0);
         const bool copy_dominates = 
           (copy_expr->expr_id == current_users->view_expr->expr_id) ||
           (copy_expr->get_volume() == current_users->view_volume);
@@ -2830,7 +2832,8 @@ namespace Legion {
       const ApEvent start_use_event = manager->get_use_event();
       if (start_use_event.exists())
         preconditions[start_use_event].insert(copy_expr, copy_mask);
-      const RegionUsage usage(reading ? READ_ONLY : READ_WRITE, EXCLUSIVE, 0);
+      const RegionUsage usage(reading ? LEGION_READ_ONLY : LEGION_READ_WRITE, 
+                              LEGION_EXCLUSIVE, 0);
       const bool copy_dominates = 
           (copy_expr->expr_id == current_users->view_expr->expr_id) ||
           (copy_expr->get_volume() == current_users->view_volume);
@@ -2991,7 +2994,8 @@ namespace Legion {
         }
 #endif
         // Now we can do our local analysis
-        const RegionUsage usage(reading ? READ_ONLY : READ_WRITE, EXCLUSIVE, 0);
+        const RegionUsage usage(reading ? LEGION_READ_ONLY : LEGION_READ_WRITE,
+                                LEGION_EXCLUSIVE, 0);
         add_internal_copy_user(usage, copy_expr, copy_mask, term_event, 
                                collect_event, op_id, index, trace_recording);
       }
@@ -4449,7 +4453,7 @@ namespace Legion {
         // If we're not the logical owner send a message there 
         // to do the analysis and provide a user event to trigger
         // with the precondition
-        ApUserEvent ready_event = Runtime::create_ap_user_event();
+        ApUserEvent ready_event = Runtime::create_ap_user_event(&trace_info);
         RtUserEvent applied_event = Runtime::create_rt_user_event();
         Serializer rez;
         {
@@ -4629,8 +4633,8 @@ namespace Legion {
       }
       else
       {
-        const RegionUsage usage(reading ? READ_ONLY : REDUCE, 
-                                EXCLUSIVE, manager->redop);
+        const RegionUsage usage(reading ? LEGION_READ_ONLY : LEGION_REDUCE, 
+                                LEGION_EXCLUSIVE, manager->redop);
         const bool issue_collect = add_user(usage, copy_expr, copy_mask,
             term_event, collect_event, op_id, index, true/*copy*/,
             applied_events, trace_recording);

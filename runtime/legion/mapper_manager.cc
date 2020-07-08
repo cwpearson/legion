@@ -1546,13 +1546,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     VariantID MapperManager::register_task_variant(MappingCallInfo *ctx,
                                       const TaskVariantRegistrar &registrar,
-				      const CodeDescriptor &codedesc,
+				      const CodeDescriptor &realm_desc,
 				      const void *user_data, size_t user_len,
                                       bool has_return_type)
     //--------------------------------------------------------------------------
     {
       pause_mapper_call(ctx);
-      CodeDescriptor *realm_desc = new CodeDescriptor(codedesc);
       VariantID result = runtime->register_variant(registrar, user_data,
                                     user_len, realm_desc, has_return_type);
       resume_mapper_call(ctx);
@@ -1752,7 +1751,8 @@ namespace Legion {
                                     const std::vector<LogicalRegion> &regions,
                                     MappingInstance &result, 
                                     bool acquire, GCPriority priority,
-                                    bool tight_region_bounds, size_t *footprint)
+                                    bool tight_region_bounds, size_t *footprint,
+                                    const LayoutConstraint **unsat)
     //--------------------------------------------------------------------------
     {
       if (!target_memory.exists())
@@ -1772,7 +1772,7 @@ namespace Legion {
       pause_mapper_call(ctx);
       bool success = runtime->create_physical_instance(target_memory, 
         constraints, regions, result, mapper_id, processor, acquire, priority,
-        tight_region_bounds, footprint, (ctx->operation == NULL) ? 
+        tight_region_bounds, unsat, footprint, (ctx->operation == NULL) ? 
           0 : ctx->operation->get_unique_op_id());
       if (success && acquire)
         record_acquired_instance(ctx, result.impl, true/*created*/);
@@ -1787,7 +1787,8 @@ namespace Legion {
                                     const std::vector<LogicalRegion> &regions,
                                     MappingInstance &result,
                                     bool acquire, GCPriority priority,
-                                    bool tight_region_bounds, size_t *footprint)
+                                    bool tight_region_bounds, size_t *footprint,
+                                    const LayoutConstraint **unsat)
     //--------------------------------------------------------------------------
     {
       if (!target_memory.exists())
@@ -1807,8 +1808,9 @@ namespace Legion {
       pause_mapper_call(ctx);
       bool success = runtime->create_physical_instance(target_memory, layout_id,
                       regions, result, mapper_id, processor, acquire, priority,
-                      tight_region_bounds, footprint, (ctx->operation == NULL) ? 
-                        0 : ctx->operation->get_unique_op_id());
+                      tight_region_bounds, unsat, footprint,
+                      (ctx->operation == NULL) ? 0 : 
+                        ctx->operation->get_unique_op_id());
       if (success && acquire)
         record_acquired_instance(ctx, result.impl, true/*created*/);
       resume_mapper_call(ctx);
@@ -1822,7 +1824,8 @@ namespace Legion {
                                     const std::vector<LogicalRegion> &regions,
                                     MappingInstance &result, bool &created, 
                                     bool acquire, GCPriority priority,
-                                    bool tight_region_bounds, size_t *footprint)
+                                    bool tight_region_bounds, size_t *footprint,
+                                    const LayoutConstraint **unsat)
     //--------------------------------------------------------------------------
     {
       if (!target_memory.exists())
@@ -1843,7 +1846,7 @@ namespace Legion {
       pause_mapper_call(ctx);
       bool success = runtime->find_or_create_physical_instance(target_memory,
                   constraints, regions, result, created, mapper_id, processor, 
-                  acquire, priority, tight_region_bounds, footprint,
+                  acquire, priority, tight_region_bounds, unsat, footprint,
                   (ctx->operation == NULL) ? 0 :
                    ctx->operation->get_unique_op_id());
       if (success && acquire)
@@ -1859,7 +1862,8 @@ namespace Legion {
                                     const std::vector<LogicalRegion> &regions,
                                     MappingInstance &result, bool &created, 
                                     bool acquire, GCPriority priority,
-                                    bool tight_region_bounds, size_t *footprint)
+                                    bool tight_region_bounds, size_t *footprint,
+                                    const LayoutConstraint **unsat)
     //--------------------------------------------------------------------------
     {
       if (!target_memory.exists())
@@ -1880,7 +1884,7 @@ namespace Legion {
       pause_mapper_call(ctx);
       bool success = runtime->find_or_create_physical_instance(target_memory,
                    layout_id, regions, result, created, mapper_id, processor, 
-                   acquire, priority, tight_region_bounds, footprint,
+                   acquire, priority, tight_region_bounds, unsat, footprint,
                    (ctx->operation == NULL) ? 0 : 
                     ctx->operation->get_unique_op_id());
       if (success && acquire)
@@ -1951,6 +1955,76 @@ namespace Legion {
         record_acquired_instance(ctx, result.impl, false/*created*/);
       resume_mapper_call(ctx);
       return success;
+    }
+
+    //--------------------------------------------------------------------------
+    void MapperManager::find_physical_instances(  
+                                    MappingCallInfo *ctx, Memory target_memory,
+                                    const LayoutConstraintSet &constraints,
+                                    const std::vector<LogicalRegion> &regions,
+                                    std::vector<MappingInstance> &results, 
+                                    bool acquire, bool tight_region_bounds)
+    //--------------------------------------------------------------------------
+    {
+      if (!target_memory.exists())
+        return;
+      if (regions.empty())
+        return;
+      if (regions.size() > 1)
+        check_region_consistency(ctx, "find_physical_instances", regions);
+      if (acquire && (ctx->acquired_instances == NULL))
+      {
+        REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
+                        "Ignoring acquire request to find_physical_instances "
+                        "in unsupported mapper call %s in mapper %s",
+                        get_mapper_call_name(ctx->kind), get_mapper_name());
+        acquire = false;
+      }
+      pause_mapper_call(ctx);
+      const size_t initial_size = results.size();
+      runtime->find_physical_instances(target_memory, constraints, regions, 
+                                       results, acquire, tight_region_bounds);
+      if ((initial_size < results.size()) && acquire)
+      {
+        for (unsigned idx = initial_size; idx < results.size(); idx++)
+          record_acquired_instance(ctx, results[idx].impl, false/*created*/);
+      }
+      resume_mapper_call(ctx);
+    }
+
+    //--------------------------------------------------------------------------
+    void MapperManager::find_physical_instances(  
+                                    MappingCallInfo *ctx, Memory target_memory,
+                                    LayoutConstraintID layout_id,
+                                    const std::vector<LogicalRegion> &regions,
+                                    std::vector<MappingInstance> &results, 
+                                    bool acquire, bool tight_region_bounds)
+    //--------------------------------------------------------------------------
+    {
+      if (!target_memory.exists())
+        return;
+      if (regions.empty())
+        return;
+      if (regions.size() > 1)
+        check_region_consistency(ctx, "find_physical_instances", regions);
+      if (acquire && (ctx->acquired_instances == NULL))
+      {
+        REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
+                        "Ignoring acquire request to find_physical_instances "
+                        "in unsupported mapper call %s in mapper %s",
+                        get_mapper_call_name(ctx->kind), get_mapper_name());
+        acquire = false;
+      }
+      pause_mapper_call(ctx);
+      const size_t initial_size = results.size();
+      runtime->find_physical_instances(target_memory, layout_id, regions, 
+                                  results, acquire, tight_region_bounds);
+      if ((initial_size < results.size()) && acquire)
+      {
+        for (unsigned idx = initial_size; idx < results.size(); idx++)
+          record_acquired_instance(ctx, results[idx].impl, false/*created*/);
+      }
+      resume_mapper_call(ctx);
     }
 
     //--------------------------------------------------------------------------
@@ -3125,7 +3199,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(task_id, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(task_id, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
@@ -3138,7 +3212,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(handle, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
@@ -3151,7 +3225,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(handle, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
@@ -3164,7 +3238,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(handle, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
@@ -3177,8 +3251,8 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, fid, NAME_SEMANTIC_TAG,
-                                             name, dummy_size, false, false);
+      runtime->retrieve_semantic_information(handle, fid, 
+          LEGION_NAME_SEMANTIC_TAG, name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
     }
@@ -3190,7 +3264,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(handle, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);
@@ -3203,7 +3277,7 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       const void *name; size_t dummy_size;
-      runtime->retrieve_semantic_information(handle, NAME_SEMANTIC_TAG,
+      runtime->retrieve_semantic_information(handle, LEGION_NAME_SEMANTIC_TAG,
                                              name, dummy_size, false, false);
       result = reinterpret_cast<const char*>(name);
       resume_mapper_call(ctx);

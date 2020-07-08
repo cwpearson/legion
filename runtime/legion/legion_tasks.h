@@ -45,58 +45,39 @@ namespace Legion {
     public:
       ResourceTracker& operator=(const ResourceTracker &rhs);
     public:
-      virtual void register_region_creations(
-                     std::set<LogicalRegion> &regions) = 0;
-      virtual void register_region_deletions(
-                     std::vector<LogicalRegion> &regions,
-                     std::set<RtEvent> &preconditions) = 0;
-    public:
-      virtual void register_field_creations(
-            std::set<std::pair<FieldSpace,FieldID> > &fields) = 0;
-      virtual void register_field_deletions(
-            std::vector<std::pair<FieldSpace,FieldID> > &fields,
-            std::set<RtEvent> &preconditions) = 0;
-    public:
-      virtual void register_field_space_creations(
-                          std::set<FieldSpace> &spaces) = 0;
-      virtual void register_latent_field_spaces(
-                          std::map<FieldSpace,unsigned> &spaces) = 0;
-      virtual void register_field_space_deletions(
-                          std::vector<FieldSpace> &spaces,
-                          std::set<RtEvent> &preconditions) = 0;
-    public:
-      virtual void register_index_space_creations(
-                          std::set<IndexSpace> &spaces) = 0;
-      virtual void register_index_space_deletions(
-                          std::vector<IndexSpace> &spaces,
-                          std::set<RtEvent> &preconditions) = 0;
-    public:
-      virtual void register_index_partition_creations(
-                          std::set<IndexPartition> &parts) = 0;
-      virtual void register_index_partition_deletions(
-                          std::vector<IndexPartition> &parts,
-                          std::set<RtEvent> &preconditions) = 0;
-    public:
-      void return_resources(ResourceTracker *target,
+      void return_resources(ResourceTracker *target, size_t return_index,
                             std::set<RtEvent> &preconditions);
-      void pack_resources_return(Serializer &rez, AddressSpaceID target);
+      virtual void receive_resources(size_t return_index,
+              std::map<LogicalRegion,unsigned> &created_regions,
+              std::vector<LogicalRegion> &deleted_regions,
+              std::set<std::pair<FieldSpace,FieldID> > &created_fields,
+              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::map<FieldSpace,unsigned> &created_field_spaces,
+              std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
+              std::vector<FieldSpace> &deleted_field_spaces,
+              std::map<IndexSpace,unsigned> &created_index_spaces,
+              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::map<IndexPartition,unsigned> &created_partitions,
+              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::set<RtEvent> &preconditions) = 0;
+      void pack_resources_return(Serializer &rez, size_t return_index);
       static RtEvent unpack_resources_return(Deserializer &derez,
                                              ResourceTracker *target);
     protected:
-      std::set<LogicalRegion>                       created_regions;
-      std::map<LogicalRegion,bool>                  local_regions;
-      std::set<std::pair<FieldSpace,FieldID> >      created_fields;
-      std::map<std::pair<FieldSpace,FieldID>,bool>  local_fields;
-      std::set<FieldSpace>                          created_field_spaces;
-      std::set<IndexSpace>                          created_index_spaces;
-      std::set<IndexPartition>                      created_index_partitions;
+      std::map<LogicalRegion,unsigned>                 created_regions;
+      std::map<LogicalRegion,bool>                     local_regions;
+      std::set<std::pair<FieldSpace,FieldID> >         created_fields;
+      std::map<std::pair<FieldSpace,FieldID>,bool>     local_fields;
+      std::map<FieldSpace,unsigned>                    created_field_spaces;
+      std::map<IndexSpace,unsigned>                    created_index_spaces;
+      std::map<IndexPartition,unsigned>                created_index_partitions;
     protected:
-      std::vector<LogicalRegion>                    deleted_regions;
-      std::vector<std::pair<FieldSpace,FieldID> >   deleted_fields;
-      std::vector<FieldSpace>                       deleted_field_spaces;
-      std::map<FieldSpace,unsigned>                 latent_field_spaces;
-      std::vector<IndexSpace>                       deleted_index_spaces;
-      std::vector<IndexPartition>                   deleted_index_partitions;
+      std::vector<LogicalRegion>                       deleted_regions;
+      std::vector<std::pair<FieldSpace,FieldID> >      deleted_fields;
+      std::vector<FieldSpace>                          deleted_field_spaces;
+      std::map<FieldSpace,std::set<LogicalRegion> >    latent_field_spaces;
+      std::vector<std::pair<IndexSpace,bool> >         deleted_index_spaces;
+      std::vector<std::pair<IndexPartition,bool> >     deleted_index_partitions;
     };
 
     /**
@@ -303,7 +284,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target) = 0;
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events) = 0;
-      virtual void perform_inlining(void) = 0;
+      virtual void perform_inlining(TaskContext *enclosing) = 0;
     public:
       virtual void end_inline_task(const void *result, 
                                    size_t result_size, bool owned);
@@ -502,8 +483,8 @@ namespace Legion {
     public:
       virtual void pack_profiling_requests(Serializer &rez,
                                            std::set<RtEvent> &applied) const;
-      virtual void add_copy_profiling_request(unsigned src_index,
-          unsigned dst_index, Realm::ProfilingRequestSet &requests, bool fill);
+      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+                               Realm::ProfilingRequestSet &requests, bool fill);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &respone,
                                       const void *orig, size_t orig_length);
@@ -539,7 +520,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target) = 0;
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events) = 0; 
-      virtual void perform_inlining(void) = 0;
+      virtual void perform_inlining(TaskContext *enclosing) = 0;
     public:
       virtual void handle_future(const void *res, 
                                  size_t res_size, bool owned) = 0; 
@@ -650,7 +631,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target) = 0;
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events) = 0;
-      virtual void perform_inlining(void) = 0;
+      virtual void perform_inlining(TaskContext *enclosing) = 0;
     public:
       virtual SliceTask* clone_as_slice_task(IndexSpace is,
                       Processor p, bool recurse, bool stealable) = 0;
@@ -768,7 +749,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target);
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events);
-      virtual void perform_inlining(void);
+      virtual void perform_inlining(TaskContext *enclosing);
       virtual bool is_top_level_task(void) const { return top_level_task; }
       virtual void end_inline_task(const void *result, 
                                    size_t result_size, bool owned);
@@ -805,6 +786,7 @@ namespace Legion {
       // Special field for the top level task
       bool top_level_task;
       bool implicit_top_level_task;
+      bool local_function_task;
       // Whether we have to do intra-task alias analysis
       bool need_intra_task_alias_analysis;
     protected:
@@ -860,7 +842,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target);
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events);
-      virtual void perform_inlining(void);
+      virtual void perform_inlining(TaskContext *enclosing);
       virtual std::map<PhysicalManager*,std::pair<unsigned,bool> >*
                                        get_acquired_instances_ref(void);
     public:
@@ -962,7 +944,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target);
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events);
-      virtual void perform_inlining(void);
+      virtual void perform_inlining(TaskContext *enclosing);
       virtual void end_inline_task(const void *result, 
                                    size_t result_size, bool owned);
       virtual VersionInfo& get_version_info(unsigned idx);
@@ -977,8 +959,8 @@ namespace Legion {
     public:
       virtual void pack_profiling_requests(Serializer &rez,
                                            std::set<RtEvent> &applied) const;
-      virtual void add_copy_profiling_request(unsigned src_index,
-          unsigned dst_index, Realm::ProfilingRequestSet &requests, bool fill);
+      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+                               Realm::ProfilingRequestSet &requests, bool fill);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &respone,
                                       const void *orig, size_t orig_length);
@@ -1101,7 +1083,7 @@ namespace Legion {
       virtual bool pack_task(Serializer &rez, AddressSpaceID target);
       virtual bool unpack_task(Deserializer &derez, Processor current,
                                std::set<RtEvent> &ready_events);
-      virtual void perform_inlining(void);
+      virtual void perform_inlining(TaskContext *enclosing);
     public:
       virtual SliceTask* clone_as_slice_task(IndexSpace is,
                   Processor p, bool recurse, bool stealable);
@@ -1143,33 +1125,19 @@ namespace Legion {
     public:
       static void handle_slice_return(Runtime *rt, Deserializer &derez);
     public: // Privilege tracker methods
-      virtual void register_region_creations(
-                     std::set<LogicalRegion> &regions);
-      virtual void register_region_deletions(
-                     std::vector<LogicalRegion> &regions,
-                     std::set<RtEvent> &preconditions);
-      virtual void register_field_creations(
-            std::set<std::pair<FieldSpace,FieldID> > &fields);
-      virtual void register_field_deletions(
-            std::vector<std::pair<FieldSpace,FieldID> > &fields,
-            std::set<RtEvent> &preconditions);
-      virtual void register_field_space_creations(
-                          std::set<FieldSpace> &spaces);
-      virtual void register_latent_field_spaces(
-                          std::map<FieldSpace,unsigned> &spaces);
-      virtual void register_field_space_deletions(
-                          std::vector<FieldSpace> &spaces,
-                          std::set<RtEvent> &preconditions);
-      virtual void register_index_space_creations(
-                          std::set<IndexSpace> &spaces);
-      virtual void register_index_space_deletions(
-                          std::vector<IndexSpace> &spaces,
-                          std::set<RtEvent> &preconditions);
-      virtual void register_index_partition_creations(
-                          std::set<IndexPartition> &parts);
-      virtual void register_index_partition_deletions(
-                          std::vector<IndexPartition> &parts,
-                          std::set<RtEvent> &preconditions);
+      virtual void receive_resources(size_t return_index,
+              std::map<LogicalRegion,unsigned> &created_regions,
+              std::vector<LogicalRegion> &deleted_regions,
+              std::set<std::pair<FieldSpace,FieldID> > &created_fields,
+              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::map<FieldSpace,unsigned> &created_field_spaces,
+              std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
+              std::vector<FieldSpace> &deleted_field_spaces,
+              std::map<IndexSpace,unsigned> &created_index_spaces,
+              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::map<IndexPartition,unsigned> &created_partitions,
+              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::set<RtEvent> &preconditions);
     public:
       // From MemoizableOp
       virtual void replay_analysis(void);

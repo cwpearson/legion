@@ -239,9 +239,10 @@ namespace Realm {
 	  p.peer_guid = ii.peer_guid;
 	  p.peer_port_idx = ii.peer_port_idx;
 	  p.indirect_port_idx = ii.indirect_port_idx;
+	  p.is_indirect_port = false;  // we'll set these below as needed
 	  p.local_bytes_total = 0;
-	  p.local_bytes_cons = 0;
-	  p.remote_bytes_total = uint64_t(-1);
+	  p.local_bytes_cons.store(0);
+	  p.remote_bytes_total.store(size_t(-1));
 	  p.ib_offset = ii.ib_offset;
 	  p.ib_size = ii.ib_size;
 	  switch(ii.port_type) {
@@ -255,9 +256,11 @@ namespace Realm {
 	// connect up indirect input ports in a second pass
 	for(size_t i = 0; i < inputs_info.size(); i++) {
 	  XferPort& p = input_ports[i];
-	  if(p.indirect_port_idx >= 0)
+	  if(p.indirect_port_idx >= 0) {
 	    p.iter->set_indirect_input_port(this, p.indirect_port_idx,
 					    input_ports[p.indirect_port_idx].iter);
+	    input_ports[p.indirect_port_idx].is_indirect_port = true;
+	  }
 	}
 	if(gather_control_port >= 0) {
 	  input_control.control_port_idx = gather_control_port;
@@ -287,12 +290,15 @@ namespace Realm {
 	  p.peer_guid = oi.peer_guid;
 	  p.peer_port_idx = oi.peer_port_idx;
 	  p.indirect_port_idx = oi.indirect_port_idx;
-	  if(oi.indirect_port_idx >= 0)
+	  p.is_indirect_port = false;  // outputs are never indirections
+	  if(oi.indirect_port_idx >= 0) {
 	    p.iter->set_indirect_input_port(this, oi.indirect_port_idx,
 					    inputs_info[oi.indirect_port_idx].iter);
+	    input_ports[p.indirect_port_idx].is_indirect_port = true;
+	  }
 	  p.local_bytes_total = 0;
-	  p.local_bytes_cons = 0;
-	  p.remote_bytes_total = size_t(-1);
+	  p.local_bytes_cons.store(0);
+	  p.remote_bytes_total.store(size_t(-1));
 	  p.ib_offset = oi.ib_offset;
 	  p.ib_size = oi.ib_size;
 
@@ -467,11 +473,13 @@ namespace Realm {
 	    assert(amt == sizeof(unsigned));
 	    const void *srcptr = ocp.mem->get_direct_ptr(c_info.base_offset, amt);
 	    assert(srcptr != 0);
+
 	    unsigned cword;
 	    memcpy(&cword, srcptr, sizeof(unsigned));
 	    update_bytes_read(output_control.control_port_idx,
                               ocp.local_bytes_total, sizeof(unsigned));
 	    ocp.local_bytes_total += sizeof(unsigned);
+	    assert(cword != 0);
 	    output_control.remaining_count = cword >> 8;
 	    output_control.current_io_port = (cword & 0x7f) - 1;
 	    output_control.eos_received = (cword & 128) != 0;
@@ -745,6 +753,7 @@ namespace Realm {
 						    !input_data_done);
 
 	    size_t num_elems = dst_bytes / out_port->serdez_op->sizeof_field_type;
+	    if(num_elems == 0) break;
 	    assert((num_elems * out_port->serdez_op->sizeof_field_type) == dst_bytes);
 	    size_t max_src_bytes = num_elems * out_port->serdez_op->max_serialized_size;
 	    // if we have an input control, restrict the max number of
@@ -811,7 +820,7 @@ namespace Realm {
 	    write_seq = out_port->local_bytes_total;
 	    write_bytes = dst_bytes;
 	    out_port->local_bytes_total += dst_bytes;
-	    out_port->local_bytes_cons = out_port->local_bytes_total; // completion detection uses this
+	    out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
 	  } else {
 	    // either no serialization or simultaneous serdez
 
@@ -1081,7 +1090,7 @@ namespace Realm {
 	    write_seq = out_port->local_bytes_total;
 	    write_bytes = act_bytes + write_pad_bytes;
 	    out_port->local_bytes_total += write_bytes;
-	    out_port->local_bytes_cons = out_port->local_bytes_total; // completion detection uses this
+	    out_port->local_bytes_cons.store(out_port->local_bytes_total); // completion detection uses this
 	  }
 
 	  Request* new_req = dequeue_request();
@@ -1178,7 +1187,8 @@ namespace Realm {
 	      if(!in_port->serdez_op && out_port->serdez_op) {
 		// ok to be over, due to the conservative nature of
 		//  deserialization reads
-		assert(rbc_snapshot >= pbt_snapshot);
+		assert((rbc_snapshot >= pbt_snapshot) ||
+		       (pbt_snapshot == size_t(-1)));
 	      } else {
 		// TODO: this check is now too aggressive because the previous
 		//  xd doesn't necessarily know when it's emitting its last
@@ -1503,7 +1513,7 @@ namespace Realm {
 	// do this before we add the span
 	if(pre_bytes_total != (size_t)-1) {
 	  // try to swap -1 for the given total
-	  uint64_t val = -1;
+	  size_t val = -1;
 	  if(!in_port->remote_bytes_total.compare_exchange(val, pre_bytes_total)) {
 	    // failure should only happen if we already had the same value
 	    assert(val == pre_bytes_total);
@@ -1841,8 +1851,17 @@ namespace Realm {
 	   (input_ports[0].mem->kind == MemoryImpl::MKIND_GPUFB)) {
 	  // all input ports should agree on which gpu they target
 	  src_gpu = ((Cuda::GPUFBMemory*)(input_ports[0].mem))->gpu;
-	  for(size_t i = 1; i < input_ports.size(); i++)
+	  for(size_t i = 1; i < input_ports.size(); i++) {
+	    // exception: control and indirect ports should be readable from cpu
+	    if((int(i) == input_control.control_port_idx) ||
+	       (int(i) == output_control.control_port_idx) ||
+	       input_ports[i].is_indirect_port) {
+	      assert((input_ports[i].mem->kind == MemoryImpl::MKIND_SYSMEM) ||
+		     (input_ports[i].mem->kind == MemoryImpl::MKIND_ZEROCOPY));
+	      continue;
+	    }
 	    assert(input_ports[i].mem == input_ports[0].mem);
+	  }
 	} else
 	  src_gpu = 0;
 
@@ -1860,9 +1879,13 @@ namespace Realm {
 	    if(src_gpu == dst_gpu) {
 	      kind = XFER_GPU_IN_FB;
 	      channel = channel_manager->get_gpu_in_fb_channel(src_gpu);
+	      // ignore max_req_size value passed in - it's probably too small
+	      max_req_size = 1 << 30;
 	    } else {
 	      kind = XFER_GPU_PEER_FB;
 	      channel = channel_manager->get_gpu_peer_fb_channel(src_gpu);
+	      // ignore max_req_size value passed in - it's probably too small
+	      max_req_size = 256 << 20;
 	    }
 	  } else {
 	    kind = XFER_GPU_FROM_FB;
@@ -1888,7 +1911,8 @@ namespace Realm {
       {
         GPURequest** reqs = (GPURequest**) requests;
 	// TODO: add support for 3D CUDA copies (just 1D and 2D for now)
-	unsigned flags = TransferIterator::LINES_OK;
+	unsigned flags = (TransferIterator::LINES_OK |
+			  TransferIterator::PLANES_OK);
         long new_nr = default_get_requests(requests, nr, flags);
         for (long i = 0; i < new_nr; i++) {
           reqs[i]->event.reset();
@@ -3087,9 +3111,9 @@ namespace Realm {
 	  // no serdez support
 	  assert((in_port->serdez_op == 0) && (out_port->serdez_op == 0));
 	  NodeID dst_node = ID(out_port->mem->me).memory_owner_node();
-	  uint64_t write_bytes_total = (req->xd->iteration_completed ?
-					  out_port->local_bytes_total :
-					  size_t(-1));
+	  size_t write_bytes_total = (req->xd->iteration_completed ?
+				        out_port->local_bytes_total :
+					size_t(-1));
 	  // send a request if there's data or if there's a next XD to update
 	  if((req->nbytes > 0) ||
 	     (out_port->peer_guid != XferDes::XFERDES_NO_GUID)) {
@@ -3231,58 +3255,104 @@ namespace Realm {
 	    continue;
 	  }
 
-          if (req->dim == Request::DIM_1D) { 
-            switch (kind) {
-              case XFER_GPU_TO_FB:
-                src_gpu->copy_to_fb(req->dst_off, req->src_base,
-                                    req->nbytes, &req->event);
-                break;
-              case XFER_GPU_FROM_FB:
-                src_gpu->copy_from_fb(req->dst_base, req->src_off,
-                                      req->nbytes, &req->event);
-                break;
-              case XFER_GPU_IN_FB:
-                src_gpu->copy_within_fb(req->dst_off, req->src_off,
-                                        req->nbytes, &req->event);
-                break;
-              case XFER_GPU_PEER_FB:
-                src_gpu->copy_to_peer(req->dst_gpu, req->dst_off,
-                                      req->src_off, req->nbytes,
-                                      &req->event);
-                break;
-              default:
-                assert(0);
-            }
-          } else {
-            assert(req->dim == Request::DIM_2D);
-            switch (kind) {
-              case XFER_GPU_TO_FB:
-                src_gpu->copy_to_fb_2d(req->dst_off, req->src_base,
-                                       req->dst_str, req->src_str,
-                                       req->nbytes, req->nlines, &req->event);
-                break;
-              case XFER_GPU_FROM_FB:
-                src_gpu->copy_from_fb_2d(req->dst_base, req->src_off,
-                                         req->dst_str, req->src_str,
-                                         req->nbytes, req->nlines,
-                                         &req->event);
-                break;
-              case XFER_GPU_IN_FB:
-                src_gpu->copy_within_fb_2d(req->dst_off, req->src_off,
-                                           req->dst_str, req->src_str,
-                                           req->nbytes, req->nlines,
-                                           &req->event);
-                break;
-              case XFER_GPU_PEER_FB:
-                src_gpu->copy_to_peer_2d(req->dst_gpu, req->dst_off,
-                                         req->src_off, req->dst_str,
-                                         req->src_str, req->nbytes,
-                                         req->nlines, &req->event);
-                break;
-              default:
-                assert(0);
-            }
-          }
+	  switch(req->dim) {
+	    case Request::DIM_1D: {
+	      switch (kind) {
+                case XFER_GPU_TO_FB:
+		  src_gpu->copy_to_fb(req->dst_off, req->src_base,
+				      req->nbytes, &req->event);
+		  break;
+                case XFER_GPU_FROM_FB:
+		  src_gpu->copy_from_fb(req->dst_base, req->src_off,
+					req->nbytes, &req->event);
+		  break;
+                case XFER_GPU_IN_FB:
+		  src_gpu->copy_within_fb(req->dst_off, req->src_off,
+					  req->nbytes, &req->event);
+		  break;
+                case XFER_GPU_PEER_FB:
+		  src_gpu->copy_to_peer(req->dst_gpu, req->dst_off,
+					req->src_off, req->nbytes,
+					&req->event);
+		  break;
+                default:
+		  assert(0);
+	      }
+	      break;
+	    }
+
+	    case Request::DIM_2D: {
+              switch (kind) {
+	        case XFER_GPU_TO_FB:
+		  src_gpu->copy_to_fb_2d(req->dst_off, req->src_base,
+					 req->dst_str, req->src_str,
+					 req->nbytes, req->nlines, &req->event);
+		  break;
+	        case XFER_GPU_FROM_FB:
+		  src_gpu->copy_from_fb_2d(req->dst_base, req->src_off,
+					   req->dst_str, req->src_str,
+					   req->nbytes, req->nlines,
+					   &req->event);
+		  break;
+                case XFER_GPU_IN_FB:
+		  src_gpu->copy_within_fb_2d(req->dst_off, req->src_off,
+					     req->dst_str, req->src_str,
+					     req->nbytes, req->nlines,
+					     &req->event);
+		  break;
+                case XFER_GPU_PEER_FB:
+		  src_gpu->copy_to_peer_2d(req->dst_gpu, req->dst_off,
+					   req->src_off, req->dst_str,
+					   req->src_str, req->nbytes,
+					   req->nlines, &req->event);
+		  break;
+                default:
+		  assert(0);
+	      }
+	      break;
+	    }
+
+	    case Request::DIM_3D: {
+              switch (kind) {
+	        case XFER_GPU_TO_FB:
+		  src_gpu->copy_to_fb_3d(req->dst_off, req->src_base,
+					 req->dst_str, req->src_str,
+					 req->dst_pstr, req->src_pstr,
+					 req->nbytes, req->nlines, req->nplanes,
+					 &req->event);
+		  break;
+	        case XFER_GPU_FROM_FB:
+		  src_gpu->copy_from_fb_3d(req->dst_base, req->src_off,
+					   req->dst_str, req->src_str,
+					   req->dst_pstr, req->src_pstr,
+					   req->nbytes, req->nlines, req->nplanes,
+					   &req->event);
+		  break;
+                case XFER_GPU_IN_FB:
+		  src_gpu->copy_within_fb_3d(req->dst_off, req->src_off,
+					     req->dst_str, req->src_str,
+					     req->dst_pstr, req->src_pstr,
+					     req->nbytes, req->nlines, req->nplanes,
+					     &req->event);
+		  break;
+                case XFER_GPU_PEER_FB:
+		  src_gpu->copy_to_peer_3d(req->dst_gpu,
+					   req->dst_off, req->src_off,
+					   req->dst_str, req->src_str,
+					   req->dst_pstr, req->src_pstr,
+					   req->nbytes, req->nlines, req->nplanes,
+					   &req->event);
+		  break;
+                default:
+		  assert(0);
+	      }
+	      break;
+	    }
+
+	    default:
+	      assert(0);
+	  }
+
           pending_copies.push_back(req);
         }
         return nr;
@@ -3622,7 +3692,7 @@ namespace Realm {
 	    for(std::map<int, size_t>::const_iterator it = git->second.pre_bytes_total.begin();
 		it != git->second.pre_bytes_total.end();
 		++it)
-	      xd->input_ports[it->first].remote_bytes_total = it->second;
+	      xd->input_ports[it->first].remote_bytes_total.store(it->second);
 	    for(std::map<int, SequenceAssembler>::iterator it = git->second.seq_pre_write.begin();
 		it != git->second.seq_pre_write.end();
 		++it)

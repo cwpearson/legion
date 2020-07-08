@@ -60,8 +60,7 @@ namespace Legion {
       // Now that we know we're going to do this fill add any profiling requests
       Realm::ProfilingRequestSet requests;
       if (trace_info.op != NULL)
-        trace_info.op->add_copy_profiling_request(trace_info.index,
-            trace_info.dst_index, requests, true/*fill*/);
+        trace_info.op->add_copy_profiling_request(trace_info, requests, true);
       if (forest->runtime->profiler != NULL)
         forest->runtime->profiler->add_fill_request(requests, trace_info.op);
 #ifdef LEGION_SPY
@@ -99,8 +98,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists())
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -176,8 +175,7 @@ namespace Legion {
       // Now that we know we're going to do this copy add any profling requests
       Realm::ProfilingRequestSet requests;
       if (trace_info.op != NULL)
-        trace_info.op->add_copy_profiling_request(trace_info.index,
-            trace_info.dst_index, requests, false/*fill*/);
+        trace_info.op->add_copy_profiling_request(trace_info, requests, false);
       if (forest->runtime->profiler != NULL)
         forest->runtime->profiler->add_copy_request(requests, trace_info.op);
 #ifdef LEGION_SPY
@@ -227,8 +225,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists())
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -363,8 +361,7 @@ namespace Legion {
       // Now that we know we're going to do this copy add any profling requests
       Realm::ProfilingRequestSet requests;
       if (trace_info.op != NULL)
-        trace_info.op->add_copy_profiling_request(trace_info.index,
-            trace_info.dst_index, requests, false/*fill*/);
+        trace_info.op->add_copy_profiling_request(trace_info, requests, false);
       if (forest->runtime->profiler != NULL)
         forest->runtime->profiler->add_copy_request(requests, trace_info.op);
 #ifdef LEGION_SPY
@@ -412,8 +409,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists())
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -512,7 +509,7 @@ namespace Legion {
             constraints.alignment_constraints.end(); it++)
       {
 #ifdef DEBUG_LEGION
-        assert(it->eqk == EQ_EK);
+        assert(it->eqk == LEGION_EQ_EK);
 #endif
         alignments[it->fid] = it->alignment;
       }
@@ -555,7 +552,7 @@ namespace Legion {
       for (unsigned idx = 0; order.ordering.size(); idx++)
       {
         const DimensionKind dim = order.ordering[idx];
-        if (dim == DIM_F)
+        if (dim == LEGION_DIM_F)
         {
           field_index = idx;
           break;
@@ -640,7 +637,7 @@ namespace Legion {
           for (std::vector<DimensionKind>::const_iterator dit = 
                 order.ordering.begin(); dit != order.ordering.end(); dit++)
           {
-            if ((*dit) != DIM_F)
+            if ((*dit) != LEGION_DIM_F)
             {
 #ifdef DEBUG_LEGION
               assert(int(*dit) < DIM);
@@ -1067,7 +1064,7 @@ namespace Legion {
         IndexSpaceExpression *sub = sub_expressions[idx];
         // Add the parent and the reference
         sub->add_parent_operation(this);
-        sub->add_expression_reference();
+        sub->add_expression_reference(true/*expr tree*/);
         // Then get the realm index space expression
         ApEvent precondition = sub->get_expr_index_space(
             &spaces[idx], this->type_tag, false/*need tight result*/);
@@ -1135,7 +1132,7 @@ namespace Legion {
         IndexSpaceExpression *sub = sub_expressions[idx];
         // Add the parent and the reference
         sub->add_parent_operation(this);
-        sub->add_expression_reference();
+        sub->add_expression_reference(true/*expr tree*/);
       }
     }
 
@@ -1156,7 +1153,7 @@ namespace Legion {
     {
       // Remove references from our sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        if (sub_expressions[idx]->remove_expression_reference())
+        if (sub_expressions[idx]->remove_expression_reference(true/*exprtree*/))
           delete sub_expressions[idx];
     }
 
@@ -1237,7 +1234,7 @@ namespace Legion {
         forest->remove_union_operation(this, sub_expressions);
       // Remove our expression reference added by invalidate_operation
       // and return true if we should be deleted
-      return this->remove_expression_reference();
+      return this->remove_expression_reference(true/*expr tree*/);
     }
 
     //--------------------------------------------------------------------------
@@ -1271,7 +1268,7 @@ namespace Legion {
         IndexSpaceExpression *sub = sub_expressions[idx];
         // Add the parent and the reference
         sub->add_parent_operation(this);
-        sub->add_expression_reference();
+        sub->add_expression_reference(true/*expr tree*/);
         ApEvent precondition = sub->get_expr_index_space(
             &spaces[idx], this->type_tag, false/*need tight result*/);
         if (precondition.exists())
@@ -1338,7 +1335,7 @@ namespace Legion {
         IndexSpaceExpression *sub = sub_expressions[idx];
         // Add the parent and the reference
         sub->add_parent_operation(this);
-        sub->add_expression_reference();
+        sub->add_expression_reference(true/*expr tree*/);
       }
     }
 
@@ -1360,7 +1357,7 @@ namespace Legion {
     {
       // Remove references from our sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        if (sub_expressions[idx]->remove_expression_reference())
+        if (sub_expressions[idx]->remove_expression_reference(true/*exprtree*/))
           delete sub_expressions[idx];
     }
 
@@ -1441,7 +1438,7 @@ namespace Legion {
         forest->remove_intersection_operation(this, sub_expressions);
       // Remove our expression reference added by invalidate_operation
       // and return true if we should be deleted
-      return this->remove_expression_reference();
+      return this->remove_expression_reference(true/*expr tree*/);
     }
 
     //--------------------------------------------------------------------------
@@ -1471,7 +1468,7 @@ namespace Legion {
       {
         // Special case for when the expressions are the same
         lhs->add_parent_operation(this);
-        lhs->add_expression_reference();
+        lhs->add_expression_reference(true/*expr tree*/);
         this->realm_index_space = Realm::IndexSpace<DIM,T>::make_empty();
         this->tight_index_space = Realm::IndexSpace<DIM,T>::make_empty();
         this->realm_index_space_ready = ApEvent::NO_AP_EVENT;
@@ -1483,8 +1480,8 @@ namespace Legion {
         // Add the parent and the references
         lhs->add_parent_operation(this);
         rhs->add_parent_operation(this);
-        lhs->add_expression_reference();
-        rhs->add_expression_reference();
+        lhs->add_expression_reference(true/*expr tree*/);
+        rhs->add_expression_reference(true/*expr tree*/);
         ApEvent left_ready = 
           lhs->get_expr_index_space(&lhs_space, this->type_tag, false/*tight*/);
         ApEvent right_ready = 
@@ -1543,12 +1540,12 @@ namespace Legion {
       if (lhs != NULL)
       {
         lhs->add_parent_operation(this);
-        lhs->add_expression_reference();
+        lhs->add_expression_reference(true/*expr tree*/);
       }
       if (rhs != NULL)
       {
         rhs->add_parent_operation(this);
-        rhs->add_expression_reference();
+        rhs->add_expression_reference(true/*expr tree*/);
       }
     }
 
@@ -1569,9 +1566,10 @@ namespace Legion {
     IndexSpaceDifference<DIM,T>::~IndexSpaceDifference(void)
     //--------------------------------------------------------------------------
     {
-      if ((rhs != NULL) && (lhs != rhs) && rhs->remove_expression_reference())
+      if ((rhs != NULL) && (lhs != rhs) && 
+          rhs->remove_expression_reference(true/*expr tree*/))
         delete rhs;
-      if ((lhs != NULL) && lhs->remove_expression_reference())
+      if ((lhs != NULL) && lhs->remove_expression_reference(true/*expr tree*/))
         delete lhs;
     }
 
@@ -1652,7 +1650,7 @@ namespace Legion {
         forest->remove_subtraction_operation(this, lhs, rhs);
       // Remove our expression reference added by invalidate_operation
       // and return true if we should be deleted
-      return this->remove_expression_reference();
+      return this->remove_expression_reference(true/*expr tree*/);
     }
 
     //--------------------------------------------------------------------------
@@ -2018,6 +2016,17 @@ namespace Legion {
     {
       if (!tight_space.empty())
       {
+        bool is_dense = tight_space.dense();
+        size_t dense_volume, sparse_volume;
+        if (is_dense)
+          dense_volume = sparse_volume = tight_space.volume();
+        else
+          {
+            dense_volume = tight_space.bounds.volume();
+            sparse_volume = tight_space.volume();
+          }
+        context->runtime->profiler->record_index_space_size(
+                          handle.get_id(), dense_volume, sparse_volume, !is_dense);
         // Iterate over the rectangles and print them out
         for (Realm::IndexSpaceIterator<DIM,T> itr(tight_space);
               itr.valid; itr.step())
@@ -2317,60 +2326,6 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool IndexSpaceNodeT<DIM,T>::destroy_node(AddressSpaceID source,
-                                              std::set<RtEvent> &applied)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(registered_with_runtime);
-#endif
-      if (destroyed)
-        REPORT_LEGION_ERROR(ERROR_ILLEGAL_INDEX_SPACE_DELETION,
-            "Duplicate deletion of Index Space %d", handle.get_id())
-      destroyed = true;
-      // If we're not the owner, send a message that we're removing
-      // the application reference
-      if (!is_owner())
-      {
-        if (source != owner_space)
-          runtime->send_index_space_destruction(handle, owner_space, applied);
-        return false;
-      }
-      else
-      {
-        if (has_remote_instances())
-        {
-          DestroyNodeFunctor functor(handle, source, runtime, applied);
-          map_over_remote_instances(functor);
-        }
-        // Traverse down and destroy all of the child nodes
-        // Need to make a copy of this in case the children
-        // end up being deleted and removing themselves
-        std::vector<IndexPartNode*> color_map_copy;
-        {
-          unsigned index = 0;
-          AutoLock n_lock(node_lock,1,false/*exclusive*/);
-          if (!color_map.empty())
-          {
-            color_map_copy.resize(color_map.size());
-            for (std::map<LegionColor,IndexPartNode*>::const_iterator it = 
-                  color_map.begin(); it != color_map.end(); it++)
-              color_map_copy[index++] = it->second;
-          }
-        }
-        if (!color_map_copy.empty())
-        {
-          for (std::vector<IndexPartNode*>::const_iterator it = 
-                color_map_copy.begin(); it != color_map_copy.end(); it++)
-            if ((*it)->destroy_node(local_space, false/*top*/, applied))
-              delete (*it);
-        }
-        return remove_base_valid_ref(APPLICATION_REF, NULL/*mutator*/);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
     LegionColor IndexSpaceNodeT<DIM,T>::get_max_linearized_color(void)
     //--------------------------------------------------------------------------
     {
@@ -2607,8 +2562,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == ready))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -2732,8 +2687,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -2858,8 +2813,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -2985,8 +2940,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3111,8 +3066,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3384,7 +3339,8 @@ namespace Legion {
       color_space->get_realm_index_space(realm_color_space, true/*tight*/); 
       const size_t count = realm_color_space.volume();
       // Unpack the futures and fill in the weights appropriately
-      std::vector<int> weights(count);
+      std::vector<int> weights;
+      std::vector<size_t> long_weights;
       std::vector<LegionColor> child_colors(count);
       unsigned color_index = 0;
       // Make all the entries for the color space
@@ -3400,12 +3356,37 @@ namespace Legion {
             REPORT_LEGION_ERROR(ERROR_MISSING_PARTITION_BY_WEIGHT_COLOR,
                 "A partition by weight call is missing an entry for a "
                 "color in the color space. All colors must be present.")
-          if (future->get_untyped_size(true/*internal*/) != sizeof(int))
+          const size_t future_size = future->get_untyped_size(true/*internal*/);
+          if (future_size == sizeof(int))
+          {
+            if (weights.empty())
+            {
+              if (!long_weights.empty())
+                REPORT_LEGION_ERROR(ERROR_INVALID_PARTITION_BY_WEIGHT_VALUE,
+                  "An invalid future size was found in a partition by weight "
+                  "call. All futures must be consistent int or size_t values.")
+              weights.resize(count);
+            }
+            weights[color_index] = *(static_cast<int*>(
+              future->get_untyped_result(true, NULL, true/*internal*/)));
+          }
+          else if (future_size == sizeof(size_t))
+          {
+            if (long_weights.empty())
+            {
+              if (!weights.empty())
+                REPORT_LEGION_ERROR(ERROR_INVALID_PARTITION_BY_WEIGHT_VALUE,
+                  "An invalid future size was found in a partition by weight "
+                  "call. All futures must be consistent int or size_t values.")
+              long_weights.resize(count);
+            }
+            long_weights[color_index] = *(static_cast<size_t*>(
+              future->get_untyped_result(true, NULL, true/*internal*/)));
+          }
+          else
             REPORT_LEGION_ERROR(ERROR_INVALID_PARTITION_BY_WEIGHT_VALUE,
                   "An invalid future size was found in a partition by weight "
-                  "call. All futures must contain int values.")
-          weights[color_index] = *(static_cast<int*>(
-                future->get_untyped_result(true, NULL, true/*internal*/)));
+                  "call. All futures must contain int or size_t values.")
           child_colors[color_index++] = color_space->linearize_color(&itr.p,
                                           color_space->handle.get_type_tag());
         }
@@ -3420,13 +3401,16 @@ namespace Legion {
         ready = Runtime::merge_events(NULL, ready, 
                   op->get_execution_fence_event());
       std::vector<Realm::IndexSpace<DIM,T> > subspaces;
-      ApEvent result(local_space.create_weighted_subspaces(count,
+      ApEvent result(weights.empty() ?
+          local_space.create_weighted_subspaces(count,
+            granularity, long_weights, subspaces, requests, ready) :
+          local_space.create_weighted_subspaces(count,
             granularity, weights, subspaces, requests, ready));
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == ready))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3511,8 +3495,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3644,8 +3628,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3800,8 +3784,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -3955,8 +3939,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -4111,8 +4095,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -4229,8 +4213,8 @@ namespace Legion {
 #ifdef LEGION_DISABLE_EVENT_PRUNING
       if (!result.exists() || (result == precondition))
       {
-        ApUserEvent new_result = Runtime::create_ap_user_event();
-        Runtime::trigger_event(new_result);
+        ApUserEvent new_result = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, new_result);
         result = new_result;
       }
 #endif
@@ -4290,7 +4274,7 @@ namespace Legion {
       DETAILED_PROFILER(context->runtime, REALM_CREATE_INSTANCE_CALL);
 #ifdef DEBUG_LEGION
       assert(int(dimension_order.ordering.size()) == (DIM+1));
-      assert(dimension_order.ordering.back() == DIM_F);
+      assert(dimension_order.ordering.back() == LEGION_DIM_F);
 #endif
       // Have to wait for the index space to be ready if necessary
       Realm::IndexSpace<DIM,T> local_space;
@@ -4688,66 +4672,6 @@ namespace Legion {
       // should never be called
       assert(false);
       return *this;
-    } 
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
-    bool IndexPartNodeT<DIM,T>::destroy_node(AddressSpaceID source, bool top,
-                                             std::set<RtEvent> &applied) 
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(registered_with_runtime);
-#endif
-      if (destroyed)
-      {
-        // Deletion operations for different parts of the index space tree
-        // can actually race to get here, so we don't report any races here
-#if 0
-        if (top)
-          REPORT_LEGION_ERROR(ERROR_ILLEGAL_INDEX_PARTITION_DELETION,
-              "Duplicate deletion of Index Partition %d", handle.get_id())
-        else
-#endif
-        return false;
-      }
-      destroyed = true;
-      // If we're not the owner send a message to do the destruction
-      // otherwise we can do it here
-      if (!is_owner())
-      {
-        runtime->send_index_partition_destruction(handle, owner_space, applied);
-        return false;
-      }
-      else
-      {
-#ifdef DEBUG_LEGION
-        assert(partition_ready.has_triggered());
-#endif
-        // Traverse down and destroy all of the child nodes
-        // Need to make a copy of this in case the children
-        // end up being deleted and removing themselves
-        std::vector<IndexSpaceNode*> color_map_copy;
-        {
-          unsigned index = 0;
-          AutoLock n_lock(node_lock,1,false/*exclusive*/);
-          if (!color_map.empty())
-          {
-            color_map_copy.resize(color_map.size());
-            for (std::map<LegionColor,IndexSpaceNode*>::const_iterator it =
-                  color_map.begin(); it != color_map.end(); it++)
-              color_map_copy[index++] = it->second;
-          }
-        }
-        if (!color_map_copy.empty())
-        {
-          for (std::vector<IndexSpaceNode*>::const_iterator it = 
-                color_map_copy.begin(); it != color_map_copy.end(); it++)
-            if ((*it)->destroy_node(local_space, applied))
-              delete (*it);
-        }
-        return remove_base_valid_ref(APPLICATION_REF, NULL/*mutator*/);
-      }
     } 
 #endif // defined(DEFINE_NT_TEMPLATES)
 

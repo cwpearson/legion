@@ -32,6 +32,19 @@
 
 namespace Realm {
 
+    class CompiledInstanceLayout : public PieceLookup::CompiledProgram {
+    public:
+      CompiledInstanceLayout();
+      ~CompiledInstanceLayout();
+
+      virtual void *allocate_memory(size_t bytes);
+
+      void reset();
+
+      void *program_base;
+      size_t program_size;
+    };
+
     class RegionInstanceImpl {
     protected:
       // RegionInstanceImpl creation/deletion is handled by MemoryImpl
@@ -42,7 +55,8 @@ namespace Realm {
       class DeferredCreate : public EventWaiter {
       public:
 	void defer(RegionInstanceImpl *_inst, MemoryImpl *_mem,
-		   size_t _bytes, size_t _align, Event wait_on);
+		   size_t _bytes, size_t _align, bool _need_alloc_result,
+		   Event wait_on);
 	virtual void event_triggered(bool poisoned);
 	virtual void print(std::ostream& os) const;
 	virtual Event get_finish_event(void) const;
@@ -51,6 +65,7 @@ namespace Realm {
 	RegionInstanceImpl *inst;
 	MemoryImpl *mem;
 	size_t bytes, align;
+	bool need_alloc_result;
       };
       DeferredCreate deferred_create;
 
@@ -125,8 +140,11 @@ namespace Realm {
 
 	size_t inst_offset;
 	Event ready_event;
+	bool need_alloc_result, need_notify_dealloc;
 	InstanceLayoutGeneric *layout;
 	std::string filename; // temp hack for attached files
+
+	CompiledInstanceLayout lookup_program;
       };
 
       // used for atomic access to metadata

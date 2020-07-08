@@ -32,11 +32,11 @@ GEN_SRC		:= 				# .cc files
 GEN_GPU_SRC	:=				# .cu files
 
 # You can modify these variables, some will be appended to by the runtime makefile
-INC_FLAGS	:=
+INC_FLAGS	?=
 CC_FLAGS	?=
-NVCC_FLAGS	:=
-GASNET_FLAGS	:=
-LD_FLAGS	:=
+NVCC_FLAGS	?=
+GASNET_FLAGS	?=
+LD_FLAGS	?=
 
 CXX ?= g++
 
@@ -44,13 +44,6 @@ CXX ?= g++
 #  do our own build steps
 NO_BUILD_RULES=1
 include $(LG_RT_DIR)/runtime.mk
-
-# since we're just doing Realm and not Legion, we need to strip out a few
-#  things that might have come in from CC_FLAGS that require Legion goo
-override CC_FLAGS := $(filter-out -DBOUNDS_CHECKS, \
-                     $(filter-out -DPRIVILEGE_CHECKS, \
-                     $(filter-out -DLEGION_SPY, \
-                       $(CC_FLAGS))))
 
 TESTS := serializing test_profiling ctxswitch barrier_reduce taskreg memspeed idcheck inst_reuse transpose
 TESTS += proc_group
@@ -60,6 +53,9 @@ TESTS += compqueue
 TESTS += event_subscribe
 TESTS += deferred_allocs
 TESTS += test_nodeset
+TESTS += subgraphs
+TESTS += large_tls
+TESTS += coverings
 
 # can set arguments to be passed to a test when running
 TESTARGS_ctxswitch := -ll:io 1 -t 20 -i 10000
@@ -81,6 +77,8 @@ vpath %.S .:$(RUNTIME_VPATH)
 
 REALM_LIB := librealm.a
 
+TEST_OBJS := $(TESTS:%=%.o)
+
 run_all : $(TESTS:%=run_%)
 
 run_% : %
@@ -91,13 +89,13 @@ run_% : %
 build : $(TESTS)
 
 clean :
-	rm -f $(REALM_LIB) $(REALM_OBJS) $(TESTS)
+	rm -f $(REALM_LIB) $(REALM_OBJS) $(TESTS) $(TEST_OBJS)
 
 # scatter uses C++11 lambdas
 scatter.o : CC_FLAGS += -std=c++11
 
 $(TESTS) : % : %.o librealm.a
-	$(CXX) -o $@ $< $(EXTRAOBJS_$*) -L. -lrealm $(LEGION_LD_FLAGS)
+	$(CXX) -o $@ $< $(EXTRAOBJS_$*) -L. -lrealm $(LEGION_LD_FLAGS) $(LD_FLAGS)
 
 $(REALM_LIB) : $(REALM_OBJS)
 	rm -f $(REALM_LIB)
@@ -105,6 +103,7 @@ $(REALM_LIB) : $(REALM_OBJS)
 
 ifeq ($(strip $(USE_CUDA)),1)
 EXTRAOBJS_memspeed := memspeed_gpu.o
+TEST_OBJS += $(EXTRAOBJS_memspeed)
 memspeed : memspeed_gpu.o
 
 %.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)

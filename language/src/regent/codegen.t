@@ -705,15 +705,25 @@ local function physical_region_get_base_pointer(cx, region_type, index_type, fie
   end
 end
 
-local function index_space_bounds(cx, is, is_type)
+local function index_space_bounds(cx, is, is_type, domain, bounds)
   local index_type = is_type.index_type
-  local domain = terralib.newsymbol(c.legion_domain_t, "domain_" .. tostring(is_type))
-  local bounds = false
+
+  if not domain then
+    domain = terralib.newsymbol(c.legion_domain_t, "domain_" .. tostring(is_type))
+  end
+
+  if not bounds then
+    bounds = false
+  end
   local actions = quote
     var [domain] = c.legion_index_space_get_domain([cx.runtime], [is])
   end
+
   if not index_type:is_opaque() then
-    bounds = terralib.newsymbol(std.rect_type(index_type), "bounds_" .. tostring(is_type))
+    if not bounds then
+      bounds = terralib.newsymbol(std.rect_type(index_type), "bounds_" .. tostring(is_type))
+    end
+
     local bounds_actions = nil
     if index_type.dim == 1 then
       bounds_actions = quote
@@ -1261,7 +1271,7 @@ function ref:__ref(cx, expr_type)
     for i = #region_types, 1, -1 do
       local region_base_pointers = base_pointers_by_region[i]
       local region_strides = strides_by_region[i]
-      local case = data.zip(base_pointers, region_base_pointers, strides, region_strides):map(
+      local case_ = data.zip(base_pointers, region_base_pointers, strides, region_strides):map(
         function(pair)
           local base_pointer, region_base_pointer, field_strides, field_region_strides = unpack(pair)
           local setup = quote [base_pointer] = [region_base_pointer] end
@@ -1275,13 +1285,13 @@ function ref:__ref(cx, expr_type)
       if cases then
         cases = quote
           if [value].__index == [i] then
-            [case]
+            [case_]
           else
             [cases]
           end
         end
       else
-        cases = case
+        cases = case_
       end
     end
 
@@ -1572,24 +1582,24 @@ function aref:__ref(cx, index)
       local region_base_pointer = base_pointers_by_region[i]
       local region_strides = strides_by_region[i]
 
-      local case = quote
+      local case_ = quote
         [base_pointer] = [region_base_pointer]
       end
       for i, stride in ipairs(strides) do
         local region_stride = region_strides[i]
-        setup = quote [case]; [stride] = [region_stride] end
+        setup = quote [case_]; [stride] = [region_stride] end
       end
 
       if cases then
         cases = quote
           if [value].__index == [i] then
-            [case]
+            [case_]
           else
             [cases]
           end
         end
       else
-        cases = case
+        cases = case_
       end
     end
 
@@ -1759,20 +1769,20 @@ function vref:read(cx, expr_type)
         local cases
         for region_idx = #base_pointers_by_region, 1, -1 do
           local base_pointer = base_pointers_by_region[region_idx][field_idx]
-          local case = quote
+          local case_ = quote
               v = base_pointer[ [vref_value].__ptr.value[ [vector_idx - 1] ] ]
           end
 
           if cases then
             cases = quote
               if [vref_value].__index[ [vector_idx - 1] ] == [region_idx] then
-                [case]
+                [case_]
               else
                 [cases]
               end
             end
           else
-            cases = case
+            cases = case_
           end
         end
         actions = quote [actions]; [cases] end
@@ -1870,7 +1880,7 @@ function vref:write(cx, value, expr_type)
         local cases
         for region_idx = #base_pointers_by_region, 1, -1 do
           local base_pointer = base_pointers_by_region[region_idx][field_idx]
-          local case = quote
+          local case_ = quote
             base_pointer[ [vref_value].__ptr.value[ [vector_idx - 1] ] ] =
               result
           end
@@ -1878,13 +1888,13 @@ function vref:write(cx, value, expr_type)
           if cases then
             cases = quote
               if [vref_value].__index[ [vector_idx - 1] ] == [region_idx] then
-                [case]
+                [case_]
               else
                 [cases]
               end
             end
           else
-            cases = case
+            cases = case_
           end
         end
         actions = quote [actions]; [cases] end
@@ -1960,20 +1970,20 @@ function vref:reduce(cx, value, op, expr_type)
         for region_idx = #base_pointers_by_region, 1, -1 do
           local base_pointer = base_pointers_by_region[region_idx][field_idx]
           local field_value = `base_pointer[ [vref_value].__ptr.value[ [vector_idx - 1] ] ]
-          local case = quote
+          local case_ = quote
             [field_value] =
               [std.quote_binary_op(fold_op, field_value, result)]
           end
           if cases then
             cases = quote
               if [vref_value].__index[ [vector_idx - 1] ] == [region_idx] then
-                [case]
+                [case_]
               else
                 [cases]
               end
             end
           else
-            cases = case
+            cases = case_
           end
         end
         actions = quote [actions]; [cases] end
@@ -2908,7 +2918,7 @@ local function strip_casts(node)
 end
 
 local function make_partition_projection_functor(cx, expr, loop_index, color_space,
-                                                 free_vars_setup, requirement)
+                                                 free_vars, free_vars_setup, requirement)
   if expr:is(ast.typed.expr.Projection) then
     expr = expr.region
   end
@@ -2948,6 +2958,22 @@ local function make_partition_projection_functor(cx, expr, loop_index, color_spa
     end
   end
 
+  -- Hack: Rooting any ispaces present manually
+  if free_vars then
+    for _, symbol in pairs(free_vars) do
+      local symbol_type = symbol:gettype()
+      if cx:has_ispace(symbol_type) then
+        local ispace = cx:ispace(symbol_type)
+        local bounds_actions, _ignore1, _ignore2 = index_space_bounds(cx, ispace.index_space, symbol_type, ispace.domain, ispace.bounds)
+        free_vars_setup:insert(
+          quote
+            var [ispace.index_space] = [symbol:getsymbol()].impl
+            [bounds_actions];
+          end)
+      end
+    end
+  end
+
   -- Generate a projection functor that evaluates `expr`.
   local value = codegen.expr(cx, index):read(cx)
 
@@ -2956,7 +2982,7 @@ local function make_partition_projection_functor(cx, expr, loop_index, color_spa
       [value.actions];
     end)
 
-    local terra partition_functor(runtime : c.legion_runtime_t,
+    local terra partition_functor([cx.runtime],
                                   mappable : c.legion_mappable_t,
                                   idx : uint,
                                   parent : c.legion_logical_partition_t,
@@ -2984,7 +3010,7 @@ local function make_partition_projection_functor(cx, expr, loop_index, color_spa
       [free_vars_setup];
       var index : index_type = [value.value];
       var subregion = c.legion_logical_partition_get_logical_subregion_by_color_domain_point(
-        runtime, parent, index)
+        [cx.runtime], parent, index)
       return subregion
     end
 
@@ -3383,7 +3409,7 @@ local function expr_call_setup_partition_arg(
     end
     assert(add_requirement)
 
-    local projection_functor = make_partition_projection_functor(cx, arg_value, loop_index, false, free_vars_setup, reg_requirement)
+    local projection_functor = make_partition_projection_functor(cx, arg_value, loop_index, false, free_vars, free_vars_setup, reg_requirement)
 
     local requirement = terralib.newsymbol(uint, "requirement")
     local requirement_args = terralib.newlist({
@@ -3744,6 +3770,40 @@ function codegen.expr_raw_fields(cx, node)
     node,
     expr.just(actions, result),
     expr_type)
+end
+
+function codegen.expr_raw_future(cx, node)
+  local value = codegen.expr(cx, node.value):read(cx, node.value.expr_type)
+
+  local future_type = node.expr_type
+  if not std.is_future(future_type) then
+    future_type = std.future(node.expr_type)
+  end
+
+  local future_value = values.value(
+    node,
+    expr.once_only(quote end,
+      `([future_type] {__result = [value.value]} ),
+      future_type),
+    future_type)
+
+  if std.is_future(node.expr_type) then
+    return future_value
+  else
+    return codegen.expr(
+      cx,
+      ast.typed.expr.FutureGetResult {
+        value = ast.typed.expr.Internal {
+          value = future_value,
+          expr_type = future_type,
+          annotations = node.annotations,
+          span = node.span,
+        },
+        expr_type = node.expr_type,
+        annotations = node.annotations,
+        span = node.span,
+     })
+  end
 end
 
 function codegen.expr_raw_physical(cx, node)
@@ -4220,8 +4280,15 @@ function codegen.expr_ispace(cx, node)
     end
   end
 
+  local source_file = tostring(node.span.source)
+  local source_line = tostring(node.span.start.line)
+
   actions = quote
     [actions]
+    c.legion_index_space_attach_semantic_information(
+      [cx.runtime], [is], c.SOURCE_FILE_TAG, [source_file], [string.len(source_file)+1], false)
+    c.legion_index_space_attach_semantic_information(
+      [cx.runtime], [is], c.SOURCE_LINE_TAG, [source_line], [string.len(source_line)+1], false)
     var [i] = [ispace_type]{ impl = [is] }
     [bounds_actions]
   end
@@ -4291,8 +4358,15 @@ function codegen.expr_region(cx, node)
                      data.dict(data.zip(field_paths:map(data.hash), base_pointers)),
                      data.dict(data.zip(field_paths:map(data.hash), strides)))
 
+  local source_file = tostring(node.span.source)
+  local source_line = tostring(node.span.start.line)
+
   local fs_naming_actions = quote
     c.legion_field_space_attach_name([cx.runtime], [fs], [tostring(fspace_type)], false)
+    c.legion_field_space_attach_semantic_information(
+      [cx.runtime], [fs], c.SOURCE_FILE_TAG, [source_file], [string.len(source_file)+1], false)
+    c.legion_field_space_attach_semantic_information(
+      [cx.runtime], [fs], c.SOURCE_LINE_TAG, [source_line], [string.len(source_line)+1], false)
   end
   if fspace_type:isstruct() then
     fs_naming_actions = quote
@@ -4325,6 +4399,9 @@ function codegen.expr_region(cx, node)
     end
   end
 
+  local source_file = tostring(node.span.source)
+  local source_line = tostring(node.span.start.line)
+
   actions = quote
     [actions]
     var capacity = [ispace.value]
@@ -4354,6 +4431,10 @@ function codegen.expr_region(cx, node)
     [fs_naming_actions];
     c.legion_field_allocator_destroy(fsa)
     var [lr] = c.legion_logical_region_create([cx.runtime], [cx.context], [is], [fs], true)
+    c.legion_logical_region_attach_semantic_information(
+      [cx.runtime], [lr], c.SOURCE_FILE_TAG, [source_file], [string.len(source_file)+1], false)
+    c.legion_logical_region_attach_semantic_information(
+      [cx.runtime], [lr], c.SOURCE_LINE_TAG, [source_line], [string.len(source_line)+1], false)
     var [r] = [region_type]{ impl = [lr] }
     [tag_imported(cx, lr)]
   end
@@ -4561,7 +4642,7 @@ function codegen.expr_partition_equal(cx, node)
              local block = `(region_rect.hi.x[ [i] ] - region_rect.lo.x[ [i] ] + 1)
              local colors = `(color_rect.hi.x[ [i] ] - color_rect.lo.x[ [i] ] + 1)
              return quote
-               var block_size = ([block] + [colors] - 1) / [colors]
+               var block_size = [block] / [colors] + ([block] % [colors] + [colors] - 1) / [colors]
                for j = 0, dim do
                  if i == j then
                    [transform].trans[i][j] = block_size
@@ -5014,6 +5095,9 @@ function codegen.expr_list_duplicate_partition(cx, node)
     cx:region(parent_region).field_id_array,
     cx:region(parent_region).fields_are_scratch)
 
+  local source_file = tostring(node.span.source)
+  local source_line = tostring(node.span.start.line)
+
   actions = quote
     [actions]
     var size = terralib.sizeof([expr_type.element_type]) * [indices.value].__size
@@ -5049,6 +5133,10 @@ function codegen.expr_list_duplicate_partition(cx, node)
       c.legion_logical_region_retrieve_name([cx.runtime], root, &name)
       std.assert(name ~= nil, "invalid name")
       c.legion_logical_region_attach_name([cx.runtime], new_root, name, false)
+      c.legion_logical_region_attach_semantic_information(
+        [cx.runtime], [r], c.SOURCE_FILE_TAG, [source_file], [string.len(source_file)+1], false)
+      c.legion_logical_region_attach_semantic_information(
+        [cx.runtime], [r], c.SOURCE_LINE_TAG, [source_line], [string.len(source_line)+1], false)
 
       [expr_type:data(result)][i] = [expr_type.element_type] { impl = r }
     end
@@ -6377,6 +6465,7 @@ local function expr_copy_setup_region(
     expr_copy_issue_phase_barriers(condition_values, condition_types, condition_kinds, launcher))
   actions:insert(quote
     c.legion_copy_launcher_execute([cx.runtime], [cx.context], [launcher])
+    c.legion_copy_launcher_destroy([launcher])
   end)
   return actions
 end
@@ -6536,8 +6625,13 @@ end
 
 local function expr_fill_setup_region(
     cx, dst_value, dst_type, dst_container_type, dst_fields,
-    value_value, value_type)
-  assert(std.is_region(dst_type))
+    value_value, value_type, index, domain, projection_functor)
+  if index then
+    assert(std.is_partition(dst_type))
+    assert(domain and projection_functor)
+  else
+    assert(std.is_region(dst_type))
+  end
   assert(std.type_supports_privileges(dst_container_type))
 
   local dst_all_fields = std.flatten_struct_fields(dst_type:fspace())
@@ -6572,13 +6666,23 @@ local function expr_fill_setup_region(
       fill_value = std.implicit_cast(
         value_field_type, dst_field_type, fill_value)
 
-      actions:insert(quote
-        var buffer : dst_field_type = [fill_value]
-        c.legion_runtime_fill_field(
-          [cx.runtime], [cx.context], [dst_value].impl, [dst_parent],
-          dst_field_id, &buffer, terralib.sizeof(dst_field_type),
-          c.legion_predicate_true())
-      end)
+      if index then
+        actions:insert(quote
+          var buffer : dst_field_type = [fill_value]
+          c.legion_runtime_index_fill_field_with_domain(
+            [cx.runtime], [cx.context], [domain], [dst_value].impl, [dst_parent],
+            dst_field_id, &buffer, [terralib.sizeof(dst_field_type)],
+            [projection_functor], c.legion_predicate_true(), 0, 0)
+        end)
+      else
+        actions:insert(quote
+          var buffer : dst_field_type = [fill_value]
+          c.legion_runtime_fill_field(
+            [cx.runtime], [cx.context], [dst_value].impl, [dst_parent],
+            dst_field_id, &buffer, terralib.sizeof(dst_field_type),
+            c.legion_predicate_true())
+        end)
+      end
     end
   end
   return actions
@@ -6601,7 +6705,7 @@ local function expr_fill_setup_list(
   else
     return expr_fill_setup_region(
       cx, dst_value, dst_type, dst_container_type, dst_fields,
-      value_value, value_type)
+      value_value, value_type, false)
   end
 end
 
@@ -6699,6 +6803,7 @@ local function expr_acquire_setup_region(
   actions:insert(quote
     [expr_acquire_issue_phase_barriers(condition_values, condition_kinds, launcher)]
     c.legion_acquire_launcher_execute([cx.runtime], [cx.context], [launcher])
+    c.legion_acquire_launcher_destroy([launcher])
   end)
   return actions
 end
@@ -6823,6 +6928,7 @@ local function expr_release_setup_region(
   actions:insert(quote
     [expr_release_issue_phase_barriers(condition_values, condition_kinds, launcher)]
     c.legion_release_launcher_execute([cx.runtime], [cx.context], [launcher])
+    c.legion_release_launcher_destroy([launcher])
   end)
   return actions
 end
@@ -6995,6 +7101,7 @@ function codegen.expr_detach_hdf5(cx, node)
        function(pr)
          return quote
            c.legion_runtime_detach_hdf5([cx.runtime], [cx.context], [pr])
+           c.legion_physical_region_destroy([pr])
          end
        end)]
   end
@@ -7786,6 +7893,9 @@ function codegen.expr(cx, node)
   elseif node:is(ast.typed.expr.RawFields) then
     return codegen.expr_raw_fields(cx, node)
 
+  elseif node:is(ast.typed.expr.RawFuture) then
+    return codegen.expr_raw_future(cx, node)
+
   elseif node:is(ast.typed.expr.RawPhysical) then
     return codegen.expr_raw_physical(cx, node)
 
@@ -8198,62 +8308,15 @@ function codegen.stat_for_list(cx, node)
       end
       ::[break_label]::
     end
-  -- or a rectangle
-  elseif std.is_rect_type(value_type) then
-    local index_type = value_type.index_type
-    local dim = index_type.dim
-    local indices = terralib.newlist()
-    for idx = 1, dim do
-      indices:insert(terralib.newsymbol(int64, "x" .. tostring(idx)))
-    end
-    local body
-    if dim == 1 then
-      body = quote
-        for [ indices[1] ] = [value.value].lo.__ptr,
-                             [value.value].hi.__ptr + 1
-        do
-          var [symbol] = [index_type]({ __ptr = [ indices[1] ] })
-          [cleanup_after(cx, codegen.block(cx, node.block))]
-        end
-      end
-    else
-      local fields = index_type.fields
-      body = quote
-        var [symbol] =
-          [index_type]({ __ptr = [index_type.base_type]{ [indices] } })
-        [cleanup_after(cx, codegen.block(cx, node.block))]
-      end
-      for idx = 1, dim do
-        body = quote
-          for [ indices[idx] ] = [value.value].lo.__ptr.[ fields[idx] ],
-                                 [value.value].hi.__ptr.[ fields[idx] ] + 1
-          do
-            [body]
-          end
-        end
-      end
-    end
-    return quote
-      [body]
-      ::[break_label]::
-    end
   end
 
-  local ispace_type, is
-  if std.is_ispace(value_type) then
-    ispace_type = value_type
-    is = `([value.value].impl)
-  elseif std.is_region(value_type) then
-    ispace_type = value_type:ispace()
-    assert(cx:has_ispace(ispace_type))
-    is = `([value.value].impl.index_space)
-  else
-    assert(false)
+  local index_type = node.symbol:gettype()
+  if std.is_bounded_type(index_type) then
+    index_type = index_type.index_type
   end
-  local index_type = ispace_type.index_type
 
   -- Retrieve dimension-specific handle types and functions from the C API
-  local dim = data.max(ispace_type.dim, 1)
+  local dim = data.max(index_type.dim, 1)
   local rect_type = c["legion_rect_" .. tostring(dim) .. "d_t"]
   local rect_it_type =
     c["legion_rect_in_domain_iterator_" .. tostring(dim) .. "d_t"]
@@ -8285,10 +8348,17 @@ function codegen.stat_for_list(cx, node)
     local available, error_message = openmphelper.check_openmp_available()
     if std.config["openmp"] ~= 0 and not available then
       report.warn(node,
-        "ignoring pragma at " .. node.span.source ..
-        ":" .. tostring(node.span.start.line) .. " since " .. error_message)
+        "ignoring pragma since " .. error_message)
     end
   end
+
+  if openmp and not cx.leaf then
+    if std.config["openmp"] ~= 0 then
+      report.error(node,
+        "OpenMP code generation failed since the OpenMP loop is in a non-leaf task")
+    end
+  end
+
 
   -- Code generation for the loop body
   local block = node.block
@@ -8334,13 +8404,13 @@ function codegen.stat_for_list(cx, node)
   end
 
   local symbol_setup = nil
-  if ispace_type.dim == 0 then
+  if index_type.dim == 0 then
     symbol_setup = quote
       var [symbol] = [symbol.type]{
         __ptr = ptr { __ptr = c.legion_ptr_t { value = [ indices[1] ] } }
       }
     end
-  elseif ispace_type.dim == 1 then
+  elseif index_type.dim == 1 then
     symbol_setup = quote
       var [symbol] = [symbol.type]{ __ptr = [ indices[1] ] }
     end
@@ -8528,19 +8598,42 @@ function codegen.stat_for_list(cx, node)
     end  -- if openmp then
   end
 
-  return quote
-    [value.actions]
-    var [domain] = c.legion_index_space_get_domain([cx.runtime], [is])
-    var [rect_it] = [rect_it_create]([domain])
-    [preamble]
-    while [rect_it_valid]([rect_it]) do
-      var [rect] = [rect_it_get]([rect_it])
-      [body]
-      [rect_it_step]([rect_it])
+
+  if not std.is_rect_type(value_type) then
+    local is = nil
+    if std.is_ispace(value_type) then
+      is = `([value.value].impl)
+    elseif std.is_region(value_type) then
+      assert(cx:has_ispace(value_type:ispace()))
+      is = `([value.value].impl.index_space)
+    else
+      assert(false)
     end
-    ::[break_label]::
-    [rect_it_destroy]([rect_it])
-    [postamble]
+
+    return quote
+      [value.actions]
+      var [domain] = c.legion_index_space_get_domain([cx.runtime], [is])
+      var [rect_it] = [rect_it_create]([domain])
+      [preamble]
+      while [rect_it_valid]([rect_it]) do
+        var [rect] = [rect_it_get]([rect_it])
+        [body]
+        [rect_it_step]([rect_it])
+      end
+      ::[break_label]::
+      [rect_it_destroy]([rect_it])
+      [postamble]
+    end
+
+  else
+    return quote
+      [value.actions]
+      [preamble]
+      var [rect] = [value.value]
+      [body]
+      ::[break_label]::
+      [postamble]
+    end
   end
 end
 
@@ -9084,42 +9177,50 @@ local function stat_index_launch_setup(cx, node, domain, actions)
       span = node.span,
     }
 
+    local reduce
     if not std.is_future(rhs_type) then
-      rhs = ast.typed.expr.FutureGetResult {
-        value = rhs,
-        expr_type = rhs_type,
+      reduce = ast.typed.stat.Reduce {
+        lhs = node.reduce_lhs,
+        rhs = ast.typed.expr.FutureGetResult {
+          value = rhs,
+          expr_type = rhs_type,
+          annotations = node.annotations,
+          span = node.span,
+        },
+        op = node.reduce_op,
+        metadata = false,
+        annotations = node.annotations,
+        span = node.span,
+      }
+    else
+      assert(node.reduce_task) -- Set by optimize_futures
+
+      reduce = ast.typed.stat.Assignment {
+        lhs = node.reduce_lhs,
+        rhs = ast.typed.expr.Call {
+          fn = ast.typed.expr.Function {
+            value = node.reduce_task,
+            expr_type = node.reduce_task:get_type(),
+            annotations = ast.default_annotations(),
+            span = node.span,
+          },
+          args = terralib.newlist({
+            node.reduce_lhs,
+            rhs,
+          }),
+          conditions = terralib.newlist(),
+          predicate = false,
+          predicate_else_value = false,
+          replicable = false,
+          expr_type = std.as_read(node.reduce_lhs.expr_type),
+          annotations = node.annotations,
+          span = node.span,
+        },
+        metadata = false,
         annotations = node.annotations,
         span = node.span,
       }
     end
-
-    assert(node.reduce_task) -- Set by optimize_futures
-
-    local reduce = ast.typed.stat.Assignment {
-      lhs = node.reduce_lhs,
-      rhs = ast.typed.expr.Call {
-        fn = ast.typed.expr.Function {
-          value = node.reduce_task,
-          expr_type = node.reduce_task:get_type(),
-          annotations = ast.default_annotations(),
-          span = node.span,
-        },
-        args = terralib.newlist({
-          node.reduce_lhs,
-          rhs,
-        }),
-        conditions = terralib.newlist(),
-        predicate = false,
-        predicate_else_value = false,
-        replicable = false,
-        expr_type = std.as_read(node.reduce_lhs.expr_type),
-        annotations = node.annotations,
-        span = node.span,
-      },
-      metadata = false,
-      annotations = node.annotations,
-      span = node.span,
-    }
 
     launcher_execute = quote
       [launcher_execute]
@@ -9178,23 +9279,13 @@ local function stat_index_fill_setup(cx, node, domain, actions)
   local projection_functor =
     make_partition_projection_functor(cx, region, node.symbol)
 
-  local launcher_actions = fill.dst.fields:map(function(field_path)
-    local field_id = cx:region(region_type):field_id(field_path)
-    return quote
-      do
-        var value : value_type = [value.value]
-        c.legion_runtime_index_fill_field_with_domain([cx.runtime], [cx.context], [domain],
-          [partition_value.value].impl, [parent_region].impl, [field_id], [&opaque](&value), [sizeof(value_type)],
-          [projection_functor], c.legion_predicate_true(), 0, 0)
-      end
-    end
-  end)
-
   return quote
     [actions]
     [value.actions]
     [partition_value.actions]
-    [launcher_actions]
+    [expr_fill_setup_region(
+       cx, partition_value.value, partition_type, region_type, fill.dst.fields,
+       value.value, value_type, true, domain, projection_functor)]
   end
 end
 

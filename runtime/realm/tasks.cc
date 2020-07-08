@@ -323,9 +323,30 @@ namespace Realm {
     callback_priorities.push_back(higher_than);
   }
 
+  void TaskQueue::remove_subscription(NotificationCallback *callback)
+  {
+    AutoLock<> al(mutex);
+    std::vector<NotificationCallback *>::iterator cit = callbacks.begin();
+    std::vector<priority_t>::iterator cpit = callback_priorities.begin();
+    while (cit != callbacks.end()) {
+      if( *cit == callback) {
+        callbacks.erase(cit);
+        callback_priorities.erase(cpit);
+        break;
+      }
+      ++cit; ++cpit;
+    }
+  }
+  
   void TaskQueue::set_gauge(ProfilingGauges::AbsoluteRangeGauge<int> *new_gauge)
   {
     task_count_gauge = new_gauge;
+  }
+
+  void TaskQueue::free_gauge()
+  {
+    delete task_count_gauge;
+    task_count_gauge = 0;
   }
 
   // gets highest priority task available from any task queue
@@ -453,103 +474,99 @@ namespace Realm {
   void ThreadedTaskScheduler::WorkCounter::increment_counter(void)
   {
     // common case is that we'll bump the counter and nobody cares, so do
-    //  this without a lock - have to make certain order of these two loads
-    //  is preserved though
-    long long old_value = counter.fetch_add_acqrel(1);
+    //  this without a lock - if the LSB is set, we'll need to look at the
+    //  wait value (and the RMW on counter makes that read synchronize
+    //  properly with the write)
+    long long old_value = counter.fetch_add_acqrel(2);
+    if(REALM_LIKELY((old_value & 1) == 0)) return;
+
+    // second non-locked check - read the wait_value and skip out if it's
+    //  not our job to signal it
     long long wv_snapshot = wait_value.load();
+    if(REALM_LIKELY(wv_snapshot != old_value)) return;
 
-//define DEBUG_WORK_COUNTER
-#ifdef DEBUG_WORK_COUNTER
-    printf("WC(%p) increment %lld (%lld)\n", this, old_value, wv_snapshot);
-#endif
-
-    // if the wait value snapshot does not equal the old value, there are no waiters, and
-    //  there can be no new waiters, because they will retest the counter after setting the
-    //  wait value and must (due to __sync_* usage) observe our update of the counter, so
-    //  we're done
-    if(old_value != wv_snapshot) return;
-
-    // if there are waiters, broadcast to wake them all up
-    // because of the race condition with pthreads (i.e. a waiter may have decided to
-    //  wait but not actually called pthread_cond_wait), this must be done while holding
-    //  the mutex - we'll use that opportunity to retest the wait value and skip the
-    //  broadcast (and associated syscall) if it has changed
     {
       AutoLock<> al(mutex);
+
+      // now that we hold the lock, wait_value cannot change - it might not
+      //  be the one expect though if a later waiter signaled ours for us
       long long wv_reread = wait_value.load();
-      if(old_value == wv_reread) {
-#ifdef DEBUG_WORK_COUNTER
-	printf("WC(%p) broadcast(1) %lld\n", this, old_value);
-#endif
-	condvar.broadcast();
 #ifdef DEBUG_REALM
-	long long wv_expected = wv_reread;
-	bool ok = wait_value.compare_exchange(wv_expected, -1);
-	assert(ok);
-#else
-	// blind store - nobody's allowed to change wait_value outside the lock
-	wait_value.store(-1);
+      assert(wv_reread >= old_value);
 #endif
+      if(wv_reread == old_value) {
+	long long check = counter.fetch_add(1);  // clear LSB, moving it forward
+	assert((check & 1) != 0);
+	wait_value.store(-1);
+	condvar.broadcast();
       }
     }
-
-#ifdef DEBUG_REALM
-    // sanity-check: a wait value earlier than the number we just incremented
-    //  from should not be possible
-#ifndef NDEBUG
-    long long wv_check = wait_value.load();
-#endif
-    assert((wv_check == -1) || (wv_check > old_value));
-#endif
   }
 
   // waits until new work arrives - this will possibly take the counter lock and 
   // sleep, so should not be called while holding another lock
   void ThreadedTaskScheduler::WorkCounter::wait_for_work(long long old_counter)
   {
+    // the old counter with the LSB set will be our wait value
+    long long oc_w_lsb = old_counter | 1;
+    
     // we assume the caller tried check_for_work() before dropping
     //  their locks and calling us, so take and hold the lock the entire time
     AutoLock<> al(mutex);
 
-    // an early out is still needed to make sure the counter hasn't moved on and somebody
-    //  isn't trying to wait on a later value
-    if(counter.load_acquire() != old_counter)
-      return;
-
-    // first, see if we catch anybody waiting on an older version of the counter - they can
-    //  definitely be awakened
+    // see if there's already a waiter
     long long wv_read = wait_value.load();
-    if((wv_read >= 0) && (wv_read < old_counter)) {
-#ifdef DEBUG_WORK_COUNTER
-      printf("WC(%p) broadcast(2) %lld\n", this, wv_read);
-#endif
-      condvar.broadcast();
-    }
-    assert(wv_read <= old_counter);
-#ifdef DEBUG_REALM
-    long long wv_expected = wv_read;
-    bool ok = wait_value.compare_exchange(wv_expected, old_counter);
-    assert(ok);
-#else
-    // blind store - nobody's allowed to change wait_value outside the lock
-    wait_value.store(old_counter);
-#endif
 
-    // now that people know we're waiting, wait until the counter updates -
-    //  check before each wait and use a fetch_add to force the reload
-    while(counter.fetch_add(0) == old_counter) {
-      // sanity-check
-#ifndef NDEBUG
-      long long wv_check = wait_value.load();
-      assert(wv_check == old_counter);
+    // unlikely case - there's a waiter on a FUTURE counter
+    if(wv_read > oc_w_lsb) {
+#ifdef DEBUG_REALM
+      assert(counter.load() > oc_w_lsb);
 #endif
-#ifdef DEBUG_WORK_COUNTER
-      printf("WC(%p) wait %lld (%lld)\n", this, old_counter, wait_value.load());
+      return;
+    }
+
+    // waiters on an older counter should be woken before we go to sleep
+    if((wv_read >= 0) && (wv_read < oc_w_lsb)) {
+      condvar.broadcast();
+#ifdef DEBUG_REALM
+      // LSB should already be set, but we still have to do the fetch_or below
+      assert((counter.load() & 1) == 1);
 #endif
+    }
+
+    if(wv_read == oc_w_lsb) {
+      // somebody's already waiting on this counter, and the eventual waker
+      //   is already going to know it, so we can just sleep along with them
+      long long wc_reread = counter.load();
+#ifdef DEBUG_REALM
+      assert((wc_reread & 1) == 1);
+#endif
+      // if we observe the count has moved on, we can return early - somebody
+      //  else will still signal the other waiters and clear wait_value
+      if(wc_reread > oc_w_lsb)
+	return;
+    } else {
+      wait_value.store(oc_w_lsb);
+      long long wc_prev = counter.fetch_or_acqrel(1);
+#ifdef DEBUG_REALM
+      // LSB should not have already been set
+      assert((wc_prev & 1) == 0);
+#endif
+      // if the counter has already moved on, cancel the wait ourselves
+      if(wc_prev > oc_w_lsb) {
+	wait_value.store(-1);
+	counter.fetch_add(1);
+	return;
+      }
+    }
+
+    // we've already done our early out on a counter bump, so just spin here
+    //  until the wait_value is changed by somebody else
+    while(wait_value.load() == oc_w_lsb) {
 #define WORK_COUNTER_TIMEOUT_CHECK
 #ifdef WORK_COUNTER_TIMEOUT_CHECK
       bool awakened = condvar.timedwait(1000000000LL);
-      if(!awakened && (counter.load_acquire() != old_counter)) {
+      if(!awakened && (counter.load() != oc_w_lsb)) {
 	static atomic<int> warncount(0);
 	static const int MAX_WARNINGS = 10;
 	int c = warncount.fetch_add(1) + 1;
@@ -561,14 +578,13 @@ namespace Realm {
 #else
       condvar.wait();
 #endif
-      //while(counter == old_counter) { mutex.unlock(); Thread::yield(); mutex.lock(); }
-#ifdef DEBUG_WORK_COUNTER
-      printf("WC(%p) ready %lld\n", this, old_counter);
-#endif
     }
 
-    // once we're done, clear the wait value, but only if it's for us
-    wait_value.compare_exchange(old_counter, -1);
+#ifdef DEBUG_REALM
+    // wait value should have moved on, or been set back to -1
+    long long wv_check = wait_value.load();
+    assert((wv_check == -1) || (wv_check > oc_w_lsb));
+#endif
   }
 
 
@@ -608,6 +624,21 @@ namespace Realm {
 
     // hook up the work counter updates for this queue
     queue->add_subscription(&wcu_task_queues);
+  }
+
+  void ThreadedTaskScheduler::remove_task_queue(TaskQueue *queue)
+  {
+    AutoLock<> al(lock);
+    for (std::vector<TaskQueue *>::iterator it = task_queues.begin(); it != task_queues.end();++it) {
+      if (*it == queue) {
+        //found; we erase and exit
+        task_queues.erase(it);
+        break;
+      }
+    }
+    
+    // un-hook up the work counter updates for this queue
+    queue->remove_subscription(&wcu_task_queues);
   }
 
   // helper for tracking/sanity-checking worker counts
@@ -806,9 +837,9 @@ namespace Realm {
       return;
 
     // this had better not be after shutdown was initiated
-    if(shutdown_flag) {
+    if(shutdown_flag.load()) {
       log_sched.fatal() << "scheduler worker awakened during shutdown: sched=" << this << " worker=" << thread;
-      assert(!shutdown_flag);
+      abort();
     }
 
     // look up the priority of this thread and then add it to the resumable workers
@@ -971,7 +1002,7 @@ namespace Realm {
 	  // no ready or resumable tasks?  thumb twiddling time
 
 	  // are we shutting down?
-	  if(shutdown_flag) {
+	  if(shutdown_flag.load()) {
 	    // yes, we can terminate - wake up an idler (if any) first though
 	    if(!idle_workers.empty()) {
 	      Thread *to_wake = idle_workers.back();
@@ -1079,6 +1110,12 @@ namespace Realm {
     ThreadedTaskScheduler::add_task_queue(queue);
   }
 
+  void  KernelThreadTaskScheduler::remove_task_queue(TaskQueue *queue)
+  {
+    // call the parent implementation first
+    ThreadedTaskScheduler::remove_task_queue(queue);
+  }
+
   void KernelThreadTaskScheduler::start(void)
   {
     // fire up the minimum number of workers
@@ -1095,7 +1132,7 @@ namespace Realm {
   void KernelThreadTaskScheduler::shutdown(void)
   {
     log_sched.info() << "scheduler shutdown requested: sched=" << this;
-    shutdown_flag = true;
+    shutdown_flag.store(true);
     // setting the shutdown flag adds "work" to the system
     work_counter.increment_counter();
 
@@ -1144,7 +1181,7 @@ namespace Realm {
       // if this was our last worker, and we're not shutting down,
       //  something bad probably happened - fire up a new worker and
       //  hope things work themselves out
-      if((all_workers.size() == 1) && !shutdown_flag) {
+      if((all_workers.size() == 1) && !shutdown_flag.load()) {
 	printf("HELP!  Lost last worker for proc " IDFMT "!", proc.id);
 	worker_terminate(worker_create(false));
       } else {
@@ -1161,7 +1198,7 @@ namespace Realm {
 
     // if this was the last thread, we'd better be in shutdown...
     if(all_workers.empty() && terminating_workers.empty()) {
-      assert(shutdown_flag);
+      assert(shutdown_flag.load());
       shutdown_condvar.signal();
     }
   }
@@ -1308,6 +1345,12 @@ namespace Realm {
     ThreadedTaskScheduler::add_task_queue(queue);
   }
 
+  void UserThreadTaskScheduler::remove_task_queue(TaskQueue *queue)
+  {
+    // call the parent implementation first
+    ThreadedTaskScheduler::remove_task_queue(queue);
+  }
+
   void UserThreadTaskScheduler::start(void)
   {
     // with user threading, active must always match the number of host threads
@@ -1348,7 +1391,7 @@ namespace Realm {
       host_startup_condvar.wait();
     }
 
-    shutdown_flag = true;
+    shutdown_flag.store(true);
     // setting the shutdown flag adds "work" to the system
     work_counter.increment_counter();
 
@@ -1403,7 +1446,7 @@ namespace Realm {
       Thread::user_switch(worker);
       do_user_thread_cleanup();
 
-      if(shutdown_flag)
+      if(shutdown_flag.load())
 	break;
 
       // getting here is unexpected
@@ -1491,7 +1534,7 @@ namespace Realm {
 
     // terminating is like sleeping, except you are allowed to terminate to "nobody" when
     //  shutting down
-    assert((switch_to != 0) || shutdown_flag);
+    assert((switch_to != 0) || shutdown_flag.load());
 
 #ifdef DEBUG_THREAD_SCHEDULER
     printf("terminate: %p -> %p\n", Thread::self(), switch_to);

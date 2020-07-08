@@ -9,6 +9,7 @@ variables:
   REALM_BACKTRACE: "1"
   REALM_SYNTHETIC_CORE_MAP: "" # Disable Realm thread pinning.
   TIMELIMIT: "600"  # each test should take less than 10 minutes
+  USE_DEFCHECK: "1"
 
 # Local variables (included on a case-by-case basis in each job):
 .gcc48: &gcc48
@@ -29,6 +30,12 @@ variables:
 .gcc8: &gcc8
   CXX: "g++-8"
   F90: "gfortran-8"
+.gcc9: &gcc9
+  CXX: "g++-9"
+  F90: "gfortran-9"
+.gcc10: &gcc10
+  CXX: "g++-10"
+  F90: "gfortran-10"
 
 .clang35: &clang35
   CXX: "clang++-3.5"
@@ -42,6 +49,12 @@ variables:
 .clang8: &clang8
   CXX: "clang++-8"
   F90: "gfortran-5"
+.clang9: &clang9
+  CXX: "clang++-9"
+  F90: "gfortran-9"
+.clang10: &clang10
+  CXX: "clang++-10"
+  F90: "gfortran-10"
 
 .terra35: &terra35
   LLVM_CONFIG: "llvm-config-3.5"
@@ -52,6 +65,9 @@ variables:
 .terra70: &terra70
   LLVM_CONFIG: "llvm-config-7"
   TERRA_DIR: "/usr/local/terra70"
+.terra9: &terra9
+  LLVM_CONFIG: "llvm-config-9"
+  TERRA_DIR: "/usr/local/terra9"
 
 .debug: &debug
   DEBUG: "1"
@@ -61,28 +77,30 @@ variables:
 .maxdim5: &maxdim5
   MAX_DIM: "5"      # test up to 5-D (useful because 1-4 have special cases)
 
+.spy: &spy
+  USE_SPY: "1"
+
+.checks: &checks
+  BOUNDS_CHECKS: "1"
+  PRIVILEGE_CHECKS: "1"
+
 .cxx98_normal: &cxx98_normal
   CC_FLAGS: "-std=c++98"
-.cxx98_checks: &cxx98_checks
-  CC_FLAGS: "-std=c++98 -DPRIVILEGE_CHECKS -DBOUNDS_CHECKS"
-.cxx98_spy: &cxx98_spy
-  CC_FLAGS: "-std=c++98 -DLEGION_SPY"
-  USE_SPY: "1"
 .cxx11_normal: &cxx11_normal
   CC_FLAGS: "-std=c++11"
 .cxx11_hardened: &cxx11_hardened
   CC_FLAGS: "-std=c++11 -D_FORTIFY_SOURCE=2 -D_GLIBCXX_ASSERTIONS"
 .cxx14_normal: &cxx14_normal
   CC_FLAGS: "-std=c++14"
-.cxx14_checks: &cxx14_checks
-  CC_FLAGS: "-std=c++14 -DPRIVILEGE_CHECKS -DBOUNDS_CHECKS"
 .cxx17_normal: &cxx17_normal
   CC_FLAGS: "-std=c++17"
-.cxx17_checks: &cxx17_checks
-  CC_FLAGS: "-std=c++17 -DPRIVILEGE_CHECKS -DBOUNDS_CHECKS"
 .cxx98_32bit_normal: &cxx98_32bit_normal
   CC_FLAGS: "-std=c++98 -m32"
   LD_FLAGS: "-m32"
+  MARCH: "i686"
+.cxx11_32bit_normal: &cxx11_32bit_normal
+  CC_FLAGS: "-std=c++11 -m32"
+  LD_FLAGS: "-m32 -latomic"
   MARCH: "i686"
 
 .openmp: &openmp
@@ -109,17 +127,25 @@ variables:
   USE_CUDA: "1"
 .gasnet: &gasnet
   REALM_NETWORKS: "gasnet1"
+  CONDUIT: "mpi"
 .gasnetdbg: &gasnetdbg
   REALM_NETWORKS: "gasnet1"
+  CONDUIT: "mpi"
   GASNET_DEBUG: "1"
   # GASNet headers are not guaranteed to be warning-free in debug mode
   WARN_AS_ERROR: "0"
 .gasnetex: &gasnetex
   REALM_NETWORKS: "gasnet1"
+  CONDUIT: "mpi"
   GASNET_VERSION: "GASNet-EX-snapshot"
   # source URL is set by a GitLab CI variable as the GASNet-EX team prefers
   #  it not to be public at this time
   #GASNETEX_SNAPSHOT_SOURCE_URL: ...
+.gasnet_ucx : &gasnet_ucx
+  REALM_NETWORKS: "gasnet1"
+  CONDUIT: "ucx"
+  UCX_SOURCE: "https://github.com/openucx/ucx/releases/download/v1.8.0/ucx-1.8.0.tar.gz"
+  UCX_WARN_UNUSED_ENV_VARS: "n"
 .mpi: &mpi
   REALM_NETWORKS: "mpi"
   # mpich-3.2
@@ -131,11 +157,7 @@ variables:
 .kokkos: &kokkos
   USE_KOKKOS: "1"
   KOKKOS_REPO: "https://github.com/kokkos/kokkos.git"
-  KOKKOS_BRANCH: "develop"
-.kokkos_fork: &kokkos_fork
-  USE_KOKKOS: "1"
-  KOKKOS_REPO: "https://github.com/streichler/kokkos.git"
-  KOKKOS_BRANCH: "legion_interop"
+  KOKKOS_BRANCH: "master"
 
 .prof: &prof
   USE_PROF: "1"
@@ -185,6 +207,20 @@ before_script:
   #     brew install pypy homebrew/versions/llvm35
   #   fi
   - |
+    if [[ "$UCX_SOURCE" != "" ]]; then
+      mkdir ucx
+      cd ucx
+      wget -O - $UCX_SOURCE | tar --strip-components=1 -zxf -
+      UCX_INSTALL_ROOT=$PWD/install
+      UCX_CONFIG_OPTS="--disable-numa"
+      contrib/configure-release --prefix=$UCX_INSTALL_ROOT $UCX_CONFIG_OPTS
+      make -j8 install
+      PATH=$PATH:$UCX_INSTALL_ROOT/bin
+      export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$UCX_INSTALL_ROOT/lib
+      # force inter-rank communication through tcp to make it "slow"
+      export UCX_TLS=tcp
+      cd ..
+    fi
     if [[ "$REALM_NETWORKS" != "" && "$(hostname)" != n0003 ]]; then
       # OpenMPI:
       # export LAUNCHER="mpirun -n 2 -x TERRA_PATH -x INCLUDE_PATH -x LD_LIBRARY_PATH -x LG_RT_DIR -x USE_RDIR"
@@ -192,7 +228,6 @@ before_script:
       export LAUNCHER="mpirun -n 2"
       export MPICH_CXX=${CXX}
       if [[ "$REALM_NETWORKS" = "gasnet1" ]]; then
-        export CONDUIT=mpi
         if [[ "$GASNET_DEBUG" -eq 1 ]]; then
           export GASNET_ROOT="$PWD/gasnet/debug"
         else
@@ -244,6 +279,7 @@ before_script:
   - |
     if [[ "$USE_KOKKOS" -eq 1 ]]; then
       git clone -b $KOKKOS_BRANCH -- $KOKKOS_REPO kokkos
+      git -C kokkos log -n 1
       mkdir kokkos/build
       cd kokkos/build
       KOKKOS_CMAKE_OPTS="-DCMAKE_INSTALL_PREFIX=../install -DKokkos_CXX_STANDARD=11"
@@ -262,6 +298,20 @@ before_script:
         #export CUDA_PATH="${CUDA}/lib64:${CUDA}/lib64/stubs"
         #export CUDA_TOOLKIT_ROOT_DIR=$CUDA
         #export CUDA_PATH="${CUDA}/bin"
+
+        if [[ "$CXX" == *clang* ]]; then
+          # clang speaks cuda, so can be used as Kokkos' "C++" compiler
+          export KOKKOS_CXX_COMPILER="$CXX"
+        else
+          # if not using clang, we need CXX to be Kokkos' nvcc_wrapper...
+          NVCC_WRAPPER=`pwd`/../bin/nvcc_wrapper
+          KOKKOS_CMAKE_OPTS="$KOKKOS_CMAKE_OPTS -DCMAKE_CXX_COMPILER=${NVCC_WRAPPER}"
+          export KOKKOS_CXX_COMPILER="${NVCC_WRAPPER}"
+          # which uses nvcc from the path, so make sure the right cuda is first
+          PATH=${CUDA}/bin:$PATH
+        fi
+      else
+        export KOKKOS_CXX_COMPILER="$CXX"
       fi
       echo cmake $KOKKOS_CMAKE_OPTS ..
       cmake $KOKKOS_CMAKE_OPTS ..
@@ -334,6 +384,8 @@ before_script:
   image: stanfordlegion/gitlab-ci:ubuntu16.04 # i.e. https://hub.docker.com/r/stanfordlegion/gitlab-ci/
 .image_clang: &image_clang
   image: stanfordlegion/gitlab-ci:ubuntu16.04-clang # i.e. https://hub.docker.com/r/stanfordlegion/gitlab-ci/
+.image_2004: &image_2004
+  image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-20.04
 
 ###
 ### Tests
@@ -346,7 +398,19 @@ before_script:
     - grep 'model name' /proc/cpuinfo | uniq -c || true
     - which $CXX
     - $CXX --version
+    - |
+      if [[ "$USE_DEFCHECK" -eq 1 ]]; then
+        export DEFCHECK_CXX="${CXX}"
+        export CXX=`pwd`/tools/cxx_defcheck
+        # if we're using MPI, make sure mpicxx uses the right compiler too
+        export OMPI_CXX=`pwd`/tools/cxx_defcheck
+        export MPICH_CXX=`pwd`/tools/cxx_defcheck
+      fi
     - free
+    - |
+      if [[ -z "$TEST_PYTHON_EXE" ]]; then
+        export TEST_PYTHON_EXE=`which python python3 | head -1`
+      fi
     - $TEST_PYTHON_EXE ./test.py
   retry:
     max: 0
@@ -362,6 +426,11 @@ before_script:
       if [[ -n $GITLAB_DEPLOY_KEY ]]; then
         eval $(ssh-agent -s)
         ssh-add <(echo "$GITLAB_DEPLOY_KEY")
+      fi
+    - unset USE_DEFCHECK
+    - |
+      if [[ -z "$TEST_PYTHON_EXE" ]]; then
+        export TEST_PYTHON_EXE=`which python python3 | head -1`
       fi
     - $TEST_PYTHON_EXE ./test.py --test=external --test=private
   retry:
@@ -417,16 +486,16 @@ gcc49_cxx98_release_llvm_cmake_regent:
 gcc49_cxx98_debug_checks_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc49, *terra38, *debug, *cxx98_checks, *legion]
+    <<: [*gcc49, *terra38, *debug, *cxx98_normal, *checks, *legion]
 #   * Spy
 gcc49_cxx98_debug_spy_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc49, *terra38, *debug, *cxx98_spy, *legion]
+    <<: [*gcc49, *terra38, *debug, *cxx98_normal, *spy, *legion]
 gcc49_cxx98_debug_spy_python3_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
-    <<: [*gcc49, *terra38, *debug, *cxx98_spy, *python3, *regent, *parallel]
+    <<: [*gcc49, *terra38, *debug, *cxx98_normal, *spy, *python3, *regent, *parallel]
 #   * Prof
 gcc49_cxx98_release_prof_regent:
   <<: [*linux_compute, *image, *tests]
@@ -504,6 +573,19 @@ gcc49_cxx98_debug_gasnetex_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
     <<: [*gcc49, *terra38, *debug, *cxx98_normal, *gasnetex, *regent, *incremental]
+#   * GASNet (UCX conduit)
+gcc49_cxx98_release_gasnet_ucx_legion:
+  <<: [*linux_compute, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *release, *cxx98_normal, *gasnet_ucx, *legion]
+gcc49_cxx98_release_gasnet_ucx_cmake_legion:
+  <<: [*linux_compute, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *release, *cxx98_normal, *gasnet_ucx, *cmake, *legion, *ctest]
+gcc49_cxx98_release_gasnet_ucx_regent:
+  <<: [*linux_compute, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *release, *cxx98_normal, *gasnet_ucx, *regent, *incremental]
 #   * MPI
 gcc49_cxx98_release_mpi_legion:
   <<: [*linux_compute, *image, *tests]
@@ -566,21 +648,25 @@ gcc49_cxx98_debug_hdf5_mpi_regent:
 gcc49_cxx98_debug_spy_gasnet_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
-    <<: [*gcc49, *terra38, *cxx98_spy, *gasnet, *regent]
+    <<: [*gcc49, *terra38, *cxx98_normal, *spy, *gasnet, *regent]
 gcc49_cxx98_debug_spy_mpi_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
-    <<: [*gcc49, *terra38, *cxx98_spy, *mpi, *regent]
+    <<: [*gcc49, *terra38, *cxx98_normal, *spy, *mpi, *regent]
 # * Different architectures
 gcc49_cxx98_32bit_debug_legion:
   <<: [*linux, *image, *tests]
   variables:
     <<: [*gcc49, *terra38, *debug, *cxx98_32bit_normal, *legion]
+gcc49_cxx98_32bit_release_legion:
+  <<: [*linux, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *release, *cxx98_32bit_normal, *legion]
 # * External tests
 gcc49_cxx11_debug_external:
   <<: [*linux_compute, *image, *external_tests]
   variables:
-    <<: [*gcc49, *terra38, *debug, *cxx11_normal, *hdf5]
+    <<: [*gcc49, *terra38, *debug, *cxx11_normal, *openmp, *hdf5]
 
 # Linux with Clang 3.8
 # * Basic configurations
@@ -597,16 +683,16 @@ clang38_cxx98_release_llvm_cmake_regent:
 clang38_cxx98_debug_checks_legion:
   <<: [*linux, *image_clang, *tests]
   variables:
-    <<: [*clang38, *terra38, *debug, *cxx98_checks, *legion]
+    <<: [*clang38, *terra38, *debug, *cxx98_normal, *checks, *legion]
 #   * Spy
 clang38_cxx98_debug_spy_legion:
   <<: [*linux, *image_clang, *tests]
   variables:
-    <<: [*clang38, *terra38, *debug, *cxx98_spy, *legion]
+    <<: [*clang38, *terra38, *debug, *cxx98_normal, *spy, *legion]
 clang38_cxx98_debug_spy_python3_regent:
   <<: [*linux_compute, *image_clang, *tests]
   variables:
-    <<: [*clang38, *terra38, *debug, *cxx98_spy, *python3, *regent, *parallel]
+    <<: [*clang38, *terra38, *debug, *cxx98_normal, *spy, *python3, *regent, *parallel]
 #   * Prof
 clang38_cxx98_release_prof_regent:
   <<: [*linux_compute, *image_clang, *tests]
@@ -721,17 +807,21 @@ clang38_cxx98_debug_hdf5_mpi_regent:
 # clang38_cxx98_debug_spy_gasnet_regent:
 #   <<: [*linux_compute, *image_clang, *tests]
 #   variables:
-#     <<: [*clang38, *terra38, *debug, *cxx98_spy, *gasnet, *regent]
+#     <<: [*clang38, *terra38, *debug, *cxx98_normal, *spy, *gasnet, *regent]
 # * Different architectures
 clang38_cxx98_32bit_debug_legion:
   <<: [*linux, *image_clang, *tests]
   variables:
     <<: [*clang38, *terra38, *debug, *cxx98_32bit_normal, *legion]
+clang38_cxx11_32bit_release_legion:
+  <<: [*linux, *image_clang, *tests]
+  variables:
+    <<: [*clang38, *terra38, *release, *cxx11_32bit_normal, *legion]
 # * External tests
 clang38_cxx11_debug_external:
   <<: [*linux_compute, *image_clang, *external_tests]
   variables:
-    <<: [*clang38, *terra38, *debug, *cxx11_normal, *hdf5]
+    <<: [*clang38, *terra38, *debug, *cxx11_normal, *openmp, *hdf5]
 
 # # macOS with Clang 3.5
 # macos_clang38_cxx98_debug:
@@ -769,7 +859,7 @@ gcc6_cxx98_debug_regent:
 gcc6_cxx14_debug_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc6, *terra38, *debug, *cxx14_checks, *legion]
+    <<: [*gcc6, *terra38, *debug, *cxx14_normal, *checks, *legion]
 gcc6_cxx14_debug_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
@@ -777,7 +867,7 @@ gcc6_cxx14_debug_regent:
 gcc7_cxx14_debug_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc7, *terra38, *debug, *cxx14_checks, *legion]
+    <<: [*gcc7, *terra38, *debug, *cxx14_normal, *checks, *legion]
 gcc7_cxx14_debug_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
@@ -785,7 +875,7 @@ gcc7_cxx14_debug_regent:
 gcc7_cxx17_debug_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc7, *terra38, *debug, *cxx17_checks, *legion]
+    <<: [*gcc7, *terra38, *debug, *cxx17_normal, *checks, *legion]
 gcc7_cxx17_debug_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
@@ -793,7 +883,7 @@ gcc7_cxx17_debug_regent:
 gcc8_cxx17_debug_legion:
   <<: [*linux, *image, *tests]
   variables:
-    <<: [*gcc8, *terra38, *debug, *cxx17_checks, *legion]
+    <<: [*gcc8, *terra38, *debug, *cxx17_normal, *checks, *legion]
 gcc8_cxx17_debug_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
@@ -808,6 +898,78 @@ gcc8_cxx11_hardened_regent:
   <<: [*linux, *image, *tests]
   variables:
     <<: [*gcc8, *terra38, *release, *cxx11_hardened, *regent, *parallel]
+
+# GCC 9
+gcc9_cxx17_debug_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc9, *terra9, *debug, *cxx17_normal, *legion]
+gcc9_cxx17_release_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc9, *terra9, *release, *cxx17_normal, *legion]
+gcc9_cxx17_debug_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc9, *terra9, *debug, *cxx17_normal, *regent]
+gcc9_cxx17_release_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc9, *terra9, *release, *cxx17_normal, *regent]
+
+# GCC 10
+gcc10_cxx17_debug_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc10, *terra9, *debug, *cxx17_normal, *legion]
+gcc10_cxx17_release_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc10, *terra9, *release, *cxx17_normal, *legion]
+gcc10_cxx17_debug_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc10, *terra9, *debug, *cxx17_normal, *regent]
+gcc10_cxx17_release_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc10, *terra9, *release, *cxx17_normal, *regent]
+
+# Clang 9
+clang9_cxx17_debug_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang9, *terra9, *debug, *cxx17_normal, *legion]
+clang9_cxx17_release_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang9, *terra9, *release, *cxx17_normal, *legion]
+clang9_cxx17_debug_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang9, *terra9, *debug, *cxx17_normal, *regent]
+clang9_cxx17_release_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang9, *terra9, *release, *cxx17_normal, *regent]
+
+# Clang 10
+clang10_cxx17_debug_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang10, *terra9, *debug, *cxx17_normal, *legion]
+clang10_cxx17_release_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang10, *terra9, *release, *cxx17_normal, *legion]
+clang10_cxx17_debug_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang10, *terra9, *debug, *cxx17_normal, *regent]
+clang10_cxx17_release_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*clang10, *terra9, *release, *cxx17_normal, *regent]
 
 # Linux with Clang 3.5
 clang35_cxx98_debug_legion:
@@ -837,27 +999,31 @@ clang8_cxx17_debug_legion:
 #     <<: [*gcc49, *terra38, *release, *cxx98_normal]
 
 # CUDA tests:
-n0003_gcc48_cxx98_release_legion_cuda:
+n0003_gcc48_cxx98_release_cuda_legion:
   <<: [*n0003, *image, *tests]
   variables:
     <<: [*gcc48, *terra38, *release, *cxx98_normal, *cuda, *legion]
-# n0003_gcc48_cxx98_release_regent_cuda:
+# n0003_gcc48_cxx98_release_cuda_regent:
 #   <<: [*n0003, *image, *tests]
 #   variables:
 #     <<: [*gcc48, *terra38, *release, *cxx98_normal, *cuda, *regent]
-p100_gcc7_cxx11_release_legion_cuda:
+p100_gcc7_cxx11_release_cuda_legion:
   <<: [*p100, *tests]
   variables:
     <<: [*gcc7, *release, *cxx11_normal, *cuda_p100, *legion]
-p100_clang7_cxx11_release_regent_cuda:
+p100_gcc7_cxx11_debug_checks_cuda_legion:
+  <<: [*p100, *tests]
+  variables:
+    <<: [*gcc7, *debug, *cxx11_normal, *checks, *cuda_p100, *legion]
+p100_clang7_cxx11_release_cuda_regent:
   <<: [*p100, *tests]
   variables:
     <<: [*clang7, *terra70, *release, *cxx11_normal, *cuda_p100, *regent]
-p100_gcc7_cxx11_release_legion_cmake_cuda:
+p100_gcc7_cxx11_release_cmake_cuda_legion:
   <<: [*p100, *tests]
   variables:
     <<: [*gcc7, *release, *cxx11_normal, *cuda_p100, *cmake, *legion, *ctest]
-p100_clang7_cxx11_release_regent_cmake_cuda:
+p100_clang7_cxx11_release_cmake_cuda_regent:
   <<: [*p100, *tests]
   variables:
     <<: [*clang7, *terra70, *release, *cxx11_normal, *cuda_p100, *cmake, *regent]
@@ -880,6 +1046,10 @@ p100_clang7_cxx11_debug_kokkos_cuda_openmp_legion:
   <<: [*p100, *tests]
   variables:
     <<: [*clang7, *debug, *cxx11_normal, *cuda_p100, *kokkos, *openmp, *cmake, *legion, *ctest]
+p100_gcc7_cxx11_debug_kokkos_cuda_openmp_legion:
+  <<: [*p100, *tests]
+  variables:
+    <<: [*gcc7, *debug, *cxx11_normal, *cuda_p100, *kokkos, *openmp, *cmake, *legion, *ctest]
 
 # Darwin Power9 tests:
 darwin_power9_gcc8_cxx17_release_legion:

@@ -89,7 +89,7 @@ static void python_main_callback(Machine machine, Runtime *runtime,
                                  const std::set<Processor> &local_procs)
 {
   // Get an ID for the top-level task, register it with the runtime
-  const TaskID top_task_id = runtime->generate_library_task_ids(unique_name, 2); 
+  const TaskID top_task_id = runtime->generate_library_task_ids(unique_name, 3); 
   runtime->set_top_level_task_id(top_task_id);
   // Register a variant for the top-level task
   {
@@ -111,20 +111,25 @@ static void python_main_callback(Machine machine, Runtime *runtime,
     CodeDescriptor code_desc(Realm::Type::from_cpp_type<Processor::TaskFuncPtr>());
     code_desc.add_implementation(
         new Realm::PythonSourceImplementation("legion_top", task_name));
-    registrar.set_leaf(true);
     runtime->register_task_variant(registrar, code_desc, NULL, 0, task_name, vid);
     runtime->attach_name(top_task_id+1, task_name, false/*mutable*/, true/*local only*/);
+  }
+  // Register a variant for the cleanup task
+  {
+    const char *const task_name = "legion_python_cleanup";
+    TaskVariantRegistrar registrar(top_task_id+2, task_name, false/*global*/);
+    registrar.add_constraint(ProcessorConstraint(Processor::PY_PROC));
+    CodeDescriptor code_desc(Realm::Type::from_cpp_type<Processor::TaskFuncPtr>());
+    code_desc.add_implementation(
+        new Realm::PythonSourceImplementation("legion_top", task_name));
+    runtime->register_task_variant(registrar, code_desc, NULL, 0, task_name, vid);
+    runtime->attach_name(top_task_id+2, task_name, false/*mutable*/, true/*local only*/);
   }
   // Register our mapper for the top-level task
   const MapperID top_mapper_id = runtime->generate_library_mapper_ids(unique_name, 1);
   runtime->set_top_level_task_mapper_id(top_mapper_id);
   runtime->add_mapper(top_mapper_id,
       new LegionPyMapper(runtime->get_mapper_runtime(), machine, top_task_id));
-}
-
-static void print_usage(FILE *out)
-{
-  fprintf(out,"legion_python [--nocr] [-c cmd | -m mod | file | -] [arg] ...\n");
 }
 
 int main(int argc, char **argv)
@@ -171,30 +176,13 @@ int main(int argc, char **argv)
 #undef str
 #endif
 
-  const char *module_name = NULL;
   int start = 1;
   if ((argc > start) && (strcmp(argv[start],"--nocr") == 0)) {
     control_replicate = false;
     start++;
   }
   if ((argc > start) && argv[start][0] == '-') {
-    if (strcmp(argv[start],"-m") == 0) {
-      if (argc < (start+2))
-      {
-        fprintf(stderr,"Argument expected for the -m option\n");
-        print_usage(stderr);
-        return 1;
-      }
-      else
-        module_name = argv[start+1];
-    } else if (strcmp(argv[start],"-c") == 0) {
-      if (argc < (start+2))
-      {
-        fprintf(stderr,"Argument expected for the -c option\n");
-        print_usage(stderr);
-        return 1;
-      }
-    } else if (argv[start][1] == '\0')
+    if (argv[start][1] == '\0')
       // Interactive console means no control replication
       control_replicate = false;
   // Note this check is safe because we filtered all the 
@@ -204,11 +192,7 @@ int main(int argc, char **argv)
     control_replicate = false;
   }
 
-  if ((module_name != NULL) && (strrchr(module_name, '.') == NULL)) {
-    Realm::Python::PythonModule::import_python_module(module_name);
-  } else {
-    Runtime::add_registration_callback(python_main_callback);
-  }
+  Runtime::add_registration_callback(python_main_callback);
 
   return Runtime::start(argc, argv);
 }
@@ -283,7 +267,7 @@ void LegionPyMapper::select_task_options(const MapperContext    ctx,
   }
   else
   {
-    assert(task.task_id == (top_task_id + 1));
+    assert(task.task_id <= (top_task_id + 2));
     output.replicate = false;
   }
   assert(!local_pys.empty());
@@ -295,7 +279,7 @@ void LegionPyMapper::slice_task(const MapperContext      ctx,
                                 const SliceTaskInput&    input,
                                       SliceTaskOutput&   output)
 {
-  assert(task.task_id == (top_task_id + 1));
+  assert(task.task_id <= (top_task_id + 2));
   const Rect<1> bounds = input.domain; 
   const size_t num_points = bounds.volume();
   output.slices.reserve(num_points);
@@ -346,7 +330,7 @@ void LegionPyMapper::map_task(const MapperContext      ctx,
   }
   else
   {
-    assert(task.task_id == (top_task_id + 1));
+    assert(task.task_id <= (top_task_id + 2));
     assert(task.regions.empty());
     output.chosen_variant = vid;
   }

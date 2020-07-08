@@ -472,11 +472,8 @@ namespace Legion {
     {
       if (num_dims != total_dims)
         return false;
-      // Layout descriptions are always complete, so just check for conflicts
-      if (constraints->conflicts(candidate_constraints, total_dims, NULL))
-        return false;
-      // If they don't conflict they have to be the same
-      return true;
+      // We need to check equality on the entire constraint sets
+      return *constraints == candidate_constraints;
     }
 
     //--------------------------------------------------------------------------
@@ -493,11 +490,9 @@ namespace Legion {
       // that we actually need to check the FieldIDs which happens next
       if (layout->allocated_fields != allocated_fields)
         return false;
-      // Layout descriptions are always complete so just check for conflicts
-      if (constraints->conflicts(layout->constraints, total_dims, NULL))
-        return false;
-      // If they don't conflict they have to be the same
-      return true;
+
+      // Check equality on the entire constraint sets
+      return *layout->constraints == *constraints;
     }
 
     //--------------------------------------------------------------------------
@@ -1025,6 +1020,10 @@ namespace Legion {
         instance.destroy(serdez_fields, deferred_event);
       else
         instance.destroy(deferred_event);
+#ifdef LEGION_MALLOC_INSTANCES
+      if (!is_external_instance())
+        memory_manager->free_legion_instance(this, deferred_event);
+#endif
 #endif
       // Notify any contexts of our deletion
       // Grab a copy of this in case we get any removal calls
@@ -1063,6 +1062,10 @@ namespace Legion {
         instance.destroy(serdez_fields);
       else
         instance.destroy();
+#ifdef LEGION_MALLOC_INSTANCES
+      if (!is_external_instance())
+        memory_manager->free_legion_instance(this, RtEvent::NO_RT_EVENT);
+#endif
 #endif
     }
 
@@ -2206,7 +2209,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     PhysicalManager* InstanceBuilder::create_physical_instance(
-                                    RegionTreeForest *forest, size_t *footprint)
+                    RegionTreeForest *forest, LayoutConstraintKind *unsat_kind,
+                    unsigned *unsat_index, size_t *footprint)
     //--------------------------------------------------------------------------
     {
       if (!valid)
@@ -2220,6 +2224,10 @@ namespace Legion {
                         memory_manager->memory.id);
         if (footprint != NULL)
           *footprint = 0;
+        if (unsat_kind != NULL)
+          *unsat_kind = LEGION_FIELD_CONSTRAINT;
+        if (unsat_index != NULL)
+          *unsat_index = 0;
         return NULL;
       }
       if (realm_layout == NULL)
@@ -2248,16 +2256,19 @@ namespace Legion {
       // Add a profiling request to see if the instance is actually allocated
       // Make it very high priority so we get the response quickly
       ProfilingResponseBase base(this);
+#ifndef LEGION_MALLOC_INSTANCES
       Realm::ProfilingRequest &req = requests.add_request(
           runtime->find_utility_group(), LG_LEGION_PROFILING_ID,
           &base, sizeof(base), LG_RESOURCE_PRIORITY);
       req.add_measurement<Realm::ProfilingMeasurements::InstanceAllocResult>();
       // Create a user event to wait on for the result of the profiling response
       profiling_ready = Runtime::create_rt_user_event();
+#endif
 #ifdef DEBUG_LEGION
       assert(!instance.exists()); // shouldn't exist before this
 #endif
       ApEvent ready;
+#ifndef LEGION_MALLOC_INSTANCES
       if (runtime->profiler != NULL)
       {
         runtime->profiler->add_inst_request(requests, creator_id);
@@ -2276,16 +2287,40 @@ namespace Legion {
                   memory_manager->memory, inst_layout, requests));
       // Wait for the profiling response
       if (!profiling_ready.has_triggered())
-        profiling_ready.wait(); 
+        profiling_ready.wait();
+#else
+      uintptr_t base_ptr = 0;
+      if (instance_footprint > 0)
+      {
+        base_ptr = 
+          memory_manager->allocate_legion_instance(instance_footprint);
+        if (base_ptr == 0)
+        {
+          if (unsat_kind != NULL)
+            *unsat_kind = LEGION_MEMORY_CONSTRAINT;
+          if (unsat_index != NULL)
+            *unsat_index = 0;
+          return NULL;
+        }
+      }
+      ready = ApEvent(PhysicalInstance::create_external(instance,
+            memory_manager->memory, base_ptr, inst_layout, requests));
+#endif
       // If we couldn't make it then we are done
       if (!instance.exists())
+      {
+        if (unsat_kind != NULL)
+          *unsat_kind = LEGION_MEMORY_CONSTRAINT;
+        if (unsat_index != NULL)
+          *unsat_index = 0;
         return NULL;
+      }
       // For Legion Spy we need a unique ready event if it doesn't already
       // exist so we can uniquely identify the instance
       if (!ready.exists() && runtime->legion_spy_enabled)
       {
-        ApUserEvent rename_ready = Runtime::create_ap_user_event();
-        Runtime::trigger_event(rename_ready);
+        ApUserEvent rename_ready = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, rename_ready);
         ready = rename_ready;
       }
       // If we successfully made the instance then Realm 
@@ -2328,8 +2363,8 @@ namespace Legion {
       // Figure out what kind of instance we just made
       switch (constraints.specialized_constraint.get_kind())
       {
-        case NO_SPECIALIZE:
-        case NORMAL_SPECIALIZE:
+        case LEGION_NO_SPECIALIZE:
+        case LEGION_AFFINE_SPECIALIZE:
           {
             // Now we can make the manager
             result = new InstanceManager(forest, did, local_space,
@@ -2342,7 +2377,7 @@ namespace Legion {
                                          false/*external instance*/);
             break;
           }
-        case REDUCTION_FOLD_SPECIALIZE:
+        case LEGION_AFFINE_REDUCTION_SPECIALIZE:
           {
             // TODO: this can go away once realm understands reduction
             // instances that contain multiple fields, Legion is ready
@@ -2352,7 +2387,7 @@ namespace Legion {
                             "Illegal request for a reduction instance "
                             "containing multiple fields. Only a single field "
                             "is currently permitted for reduction instances.")
-            ApUserEvent filled_and_ready = Runtime::create_ap_user_event();
+            ApUserEvent filled_and_ready = Runtime::create_ap_user_event(NULL);
             result = new FoldReductionManager(forest, did, local_space,
                                               memory_manager, 
                                               instance, layout, 
@@ -2368,6 +2403,7 @@ namespace Legion {
             // Don't record this fill operation because it is just part
             // of the semantics of reduction instances and not something
             // that we want Legion Spy to see
+            const PhysicalTraceInfo fake_info(NULL, -1U, false);
             if (!instance_domain->is_empty())
             {
               void *fill_buffer = malloc(reduction_op->sizeof_rhs);
@@ -2378,7 +2414,6 @@ namespace Legion {
                   constraints.field_constraint.get_field_set();
                 layout->compute_copy_offsets(fill_fields, result, dsts);
               }
-              const PhysicalTraceInfo fake_info(NULL, -1U, false);
 #ifdef LEGION_SPY
               ApEvent filled = instance_domain->issue_fill(fake_info, dsts,
                     fill_buffer, reduction_op->sizeof_rhs, 0/*uid*/, 
@@ -2392,13 +2427,13 @@ namespace Legion {
               // We can free the buffer after we've issued the fill
               free(fill_buffer);
               // Trigger our filled_and_ready event
-              Runtime::trigger_event(filled_and_ready, filled);
+              Runtime::trigger_event(&fake_info, filled_and_ready, filled);
             }
             else
-              Runtime::trigger_event(filled_and_ready);
+              Runtime::trigger_event(&fake_info, filled_and_ready);
             break;
           }
-        case REDUCTION_LIST_SPECIALIZE:
+        case LEGION_COMPACT_REDUCTION_SPECIALIZE:
           {
             // TODO: implement this
             assert(false);
@@ -2407,6 +2442,9 @@ namespace Legion {
         default:
           assert(false); // illegal specialized case
       }
+#ifdef LEGION_MALLOC_INSTANCES
+      memory_manager->record_legion_instance(result, base_ptr); 
+#endif
 #ifdef DEBUG_LEGION
       assert(result != NULL);
 #endif
@@ -2521,7 +2559,7 @@ namespace Legion {
         std::set<DimensionKind> spatial_dims, to_remove;
         for (unsigned idx = 0; idx < ord.ordering.size(); idx++)
         {
-          if (ord.ordering[idx] == DIM_F)
+          if (ord.ordering[idx] == LEGION_DIM_F)
           {
             // Should never be duplicated 
             if (field_idx != -1)
@@ -2531,7 +2569,7 @@ namespace Legion {
             else
               field_idx = idx;
           }
-          else if (ord.ordering[idx] > DIM_F)
+          else if (ord.ordering[idx] > LEGION_DIM_F)
             REPORT_LEGION_FATAL(ERROR_UNSUPPORTED_LAYOUT_CONSTRAINT,
               "Splitting layout constraints are not currently supported")
           else
@@ -2580,7 +2618,7 @@ namespace Legion {
               // Add them to the back
               for (unsigned idx = 0; idx < num_dims; idx++)
               {
-                DimensionKind dim = (DimensionKind)(DIM_X + idx);
+                DimensionKind dim = (DimensionKind)(LEGION_DIM_X + idx);
                 if (spatial_dims.find(dim) == spatial_dims.end())
                   ord.ordering.push_back(dim);
               }
@@ -2590,7 +2628,7 @@ namespace Legion {
               // Add them to the front
               for (int idx = (num_dims-1); idx >= 0; idx--)
               {
-                DimensionKind dim = (DimensionKind)(DIM_X + idx);
+                DimensionKind dim = (DimensionKind)(LEGION_DIM_X + idx);
                 if (spatial_dims.find(dim) == spatial_dims.end())
                   ord.ordering.insert(ord.ordering.begin(), dim);
               }
@@ -2603,7 +2641,7 @@ namespace Legion {
             // No field dimension so just add the spatial ones on the back
             for (unsigned idx = 0; idx < num_dims; idx++)
             {
-              DimensionKind dim = (DimensionKind)(DIM_X + idx);
+              DimensionKind dim = (DimensionKind)(LEGION_DIM_X + idx);
               if (spatial_dims.find(dim) == spatial_dims.end())
                 ord.ordering.push_back(dim);
             }
@@ -2612,7 +2650,7 @@ namespace Legion {
         // If we didn't see the field dimension either then add that
         // at the end to give us SOA layouts in general
         if (field_idx == -1)
-          ord.ordering.push_back(DIM_F);
+          ord.ordering.push_back(LEGION_DIM_F);
         // We've now got all our dimensions so we can set the
         // contiguous flag to true
         ord.contiguous = true;
@@ -2622,8 +2660,8 @@ namespace Legion {
         // We had no ordering constraints so populate it with 
         // SOA constraints for now
         for (unsigned idx = 0; idx < num_dims; idx++)
-          ord.ordering.push_back((DimensionKind)(DIM_X + idx));
-        ord.ordering.push_back(DIM_F);
+          ord.ordering.push_back((DimensionKind)(LEGION_DIM_X + idx));
+        ord.ordering.push_back(LEGION_DIM_F);
         ord.contiguous = true;
       }
 #ifdef DEBUG_LEGION
@@ -2643,10 +2681,10 @@ namespace Legion {
       // require us to update the field sizes
       switch (constraints.specialized_constraint.get_kind())
       {
-        case NO_SPECIALIZE:
-        case NORMAL_SPECIALIZE:
+        case LEGION_NO_SPECIALIZE:
+        case LEGION_AFFINE_SPECIALIZE:
           break;
-        case REDUCTION_FOLD_SPECIALIZE:
+        case LEGION_AFFINE_REDUCTION_SPECIALIZE:
           {
             // Reduction folds are a special case of normal specialize
             redop_id = constraints.specialized_constraint.get_reduction_op();
@@ -2664,7 +2702,7 @@ namespace Legion {
             }
             break;
           }
-        case REDUCTION_LIST_SPECIALIZE:
+        case LEGION_COMPACT_REDUCTION_SPECIALIZE:
           {
             // TODO: implement list reduction instances
             assert(false);
@@ -2672,7 +2710,7 @@ namespace Legion {
             reduction_op = Runtime::get_reduction_op(redop_id);
             break;
           }
-        case VIRTUAL_SPECIALIZE:
+        case LEGION_VIRTUAL_SPECIALIZE:
           {
             REPORT_LEGION_ERROR(ERROR_ILLEGAL_REQUEST_VIRTUAL_INSTANCE,
                           "Illegal request to create a virtual instance");

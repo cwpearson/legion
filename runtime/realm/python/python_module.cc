@@ -20,6 +20,7 @@
 #include "realm/logging.h"
 #include "realm/cmdline.h"
 #include "realm/proc_impl.h"
+#include "realm/mem_impl.h"
 #include "realm/threads.h"
 #include "realm/runtime_impl.h"
 #include "realm/utils.h"
@@ -481,7 +482,7 @@ namespace Realm {
 	// no ready or resumable tasks?  thumb twiddling time
 
 	// are we shutting down?
-	if(shutdown_flag) {
+	if(shutdown_flag.load()) {
 	  // yes, we can terminate - wake up an idler (if any) first though
 	  if(!idle_workers.empty()) {
 	    Thread *to_wake = idle_workers.back();
@@ -645,7 +646,7 @@ namespace Realm {
 #endif
 
     // TODO: tear down interpreter if last thread
-    if(shutdown_flag && pythreads.empty())
+    if(shutdown_flag.load() && pythreads.empty())
       pyproc->destroy_interpreter();
 
     KernelThreadTaskScheduler::worker_terminate(switch_to);
@@ -831,10 +832,16 @@ namespace Realm {
     enqueue_or_defer_task(task, start_event, &deferred_spawn_cache);
   }
 
-  void LocalPythonProcessor::add_to_group(ProcessorGroup *group)
+  void LocalPythonProcessor::add_to_group(ProcessorGroupImpl *group)
   {
     // add the group's task queue to our scheduler too
     sched->add_task_queue(&group->task_queue);
+  }
+
+  void LocalPythonProcessor::remove_from_group(ProcessorGroupImpl *group)
+  {
+    // remove the group's task queue from our scheduler
+    sched->remove_task_queue(&group->task_queue);
   }
 
   void LocalPythonProcessor::register_task(Processor::TaskFuncID func_id,

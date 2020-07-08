@@ -35,7 +35,7 @@ namespace Legion {
       public:
         DependenceRecord(int idx)
           : operation_idx(idx), prev_idx(-1), next_idx(-1),
-            validates(false), dtype(TRUE_DEPENDENCE) { }
+            validates(false), dtype(LEGION_TRUE_DEPENDENCE) { }
         DependenceRecord(int op_idx, int pidx, int nidx,
                          bool val, DependenceType d,
                          const FieldMask &m)
@@ -78,19 +78,16 @@ namespace Legion {
         PHYSICAL_REPLAY,
       };
     public:
-      LegionTrace(InnerContext *ctx, bool logical_only);
+      LegionTrace(InnerContext *ctx, TraceID tid, bool logical_only);
       virtual ~LegionTrace(void);
     public:
       virtual bool is_static_trace(void) const = 0;
-      virtual bool is_dynamic_trace(void) const = 0;
-      virtual StaticTrace* as_static_trace(void) = 0;
-      virtual DynamicTrace* as_dynamic_trace(void) = 0;
-      virtual TraceID get_trace_id(void) const = 0;
+      inline TraceID get_trace_id(void) const { return tid; }
     public:
-      virtual bool is_fixed(void) const = 0;
       virtual bool handles_region_tree(RegionTreeID tid) const = 0;
-      virtual void record_static_dependences(Operation *op,
-                     const std::vector<StaticDependence> *dependences) = 0;
+      virtual bool initialize_op_tracing(Operation *op,
+                     const std::vector<StaticDependence> *dependences,
+                     const LogicalTraceInfo *trace_info) = 0;
       virtual void register_operation(Operation *op, GenerationID gen) = 0; 
       virtual void record_dependence(Operation *target, GenerationID target_gen,
                                 Operation *source, GenerationID source_gen) = 0;
@@ -102,6 +99,11 @@ namespace Legion {
                                     const FieldMask &dependent_mask) = 0;
       virtual void record_aliased_children(unsigned req_index, unsigned depth,
                                            const FieldMask &aliased_mask) = 0;
+      virtual void end_trace_capture(void) = 0;
+    public:
+      // Called by task execution thread
+      inline bool is_fixed(void) const { return fixed; }
+      void fix_trace(void);
     public:
       bool has_physical_trace(void) { return physical_trace != NULL; }
       PhysicalTrace* get_physical_trace(void) { return physical_trace; }
@@ -129,6 +131,7 @@ namespace Legion {
 #endif
     public:
       InnerContext *const ctx;
+      const TraceID tid;
     protected:
       std::vector<std::pair<Operation*,GenerationID> > operations; 
       // We also need a data structure to record when there are
@@ -140,6 +143,7 @@ namespace Legion {
       PhysicalTrace *physical_trace;
       unsigned last_memoized;
       bool blocking_call_observed;
+      bool fixed;
       std::set<std::pair<Operation*,GenerationID> > frontiers;
 #ifdef LEGION_SPY
     protected:
@@ -159,22 +163,19 @@ namespace Legion {
     public:
       static const AllocationType alloc_type = STATIC_TRACE_ALLOC;
     public:
-      StaticTrace(InnerContext *ctx, const std::set<RegionTreeID> *trees);
+      StaticTrace(TraceID tid, InnerContext *ctx, bool logical_only,
+                  const std::set<RegionTreeID> *trees);
       StaticTrace(const StaticTrace &rhs);
       virtual ~StaticTrace(void);
     public:
       StaticTrace& operator=(const StaticTrace &rhs);
     public:
       virtual bool is_static_trace(void) const { return true; }
-      virtual bool is_dynamic_trace(void) const { return false; }
-      virtual StaticTrace* as_static_trace(void) { return this; }
-      virtual DynamicTrace* as_dynamic_trace(void) { return NULL; }
-      virtual TraceID get_trace_id(void) const { return 0; }
     public:
-      virtual bool is_fixed(void) const;
       virtual bool handles_region_tree(RegionTreeID tid) const;
-      virtual void record_static_dependences(Operation *op,
-                              const std::vector<StaticDependence> *dependences);
+      virtual bool initialize_op_tracing(Operation *op,
+                              const std::vector<StaticDependence> *dependences,
+                              const LogicalTraceInfo *trace_info);
       virtual void register_operation(Operation *op, GenerationID gen); 
       virtual void record_dependence(Operation *target,GenerationID target_gen,
                                      Operation *source,GenerationID source_gen);
@@ -186,6 +187,7 @@ namespace Legion {
                                     const FieldMask &dependent_mask);
       virtual void record_aliased_children(unsigned req_index, unsigned depth,
                                            const FieldMask &aliased_mask);
+      virtual void end_trace_capture(void);
 #ifdef LEGION_SPY
     public:
       virtual void perform_logging(
@@ -227,20 +229,10 @@ namespace Legion {
       DynamicTrace& operator=(const DynamicTrace &rhs);
     public:
       virtual bool is_static_trace(void) const { return false; }
-      virtual bool is_dynamic_trace(void) const { return true; }
-      virtual StaticTrace* as_static_trace(void) { return NULL; }
-      virtual DynamicTrace* as_dynamic_trace(void) { return this; }
-      virtual TraceID get_trace_id(void) const { return tid; }
     public:
-      // Called by task execution thread
-      virtual bool is_fixed(void) const { return fixed; }
-      void fix_trace(void);
-    public:
-      // Called by analysis thread
-      void end_trace_capture(void);
-    public:
-      virtual void record_static_dependences(Operation *op,
-                          const std::vector<StaticDependence> *dependences);
+      virtual bool initialize_op_tracing(Operation *op,
+                          const std::vector<StaticDependence> *dependences,
+                          const LogicalTraceInfo *trace_info);
       virtual bool handles_region_tree(RegionTreeID tid) const;
       // Called by analysis thread
       virtual void register_operation(Operation *op, GenerationID gen);
@@ -254,6 +246,8 @@ namespace Legion {
                                     const FieldMask &dependent_mask);
       virtual void record_aliased_children(unsigned req_index, unsigned depth,
                                            const FieldMask &aliased_mask);
+      // Called by analysis thread
+      virtual void end_trace_capture(void);
 #ifdef LEGION_SPY
     public:
       virtual void perform_logging(
@@ -285,8 +279,6 @@ namespace Legion {
       // Metadata for checking the validity of a trace when it is replayed
       std::vector<OperationInfo> op_info;
     protected:
-      const TraceID tid;
-      bool fixed;
       bool tracing;
     };
 
@@ -320,7 +312,8 @@ namespace Legion {
     public:
       TraceCaptureOp& operator=(const TraceCaptureOp &rhs);
     public:
-      void initialize_capture(InnerContext *ctx, bool has_blocking_call);
+      void initialize_capture(InnerContext *ctx, bool has_blocking_call,
+                              bool remove_trace_reference);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -329,9 +322,9 @@ namespace Legion {
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
     protected:
-      DynamicTrace *dynamic_trace;
       PhysicalTemplate *current_template;
       bool has_blocking_call;
+      bool remove_trace_reference;
     };
 
     /**
@@ -508,6 +501,14 @@ namespace Legion {
      */
     class TraceViewSet {
     public:
+      struct FailedPrecondition {
+        InstanceView *view;
+        EquivalenceSet *eq;
+        FieldMask mask;
+
+        std::string to_string(void) const;
+      };
+    public:
       TraceViewSet(RegionTreeForest *forest);
       virtual ~TraceViewSet(void);
     public:
@@ -521,7 +522,8 @@ namespace Legion {
       bool dominates(InstanceView *view,
                      EquivalenceSet *eq,
                      FieldMask &non_dominated) const;
-      bool subsumed_by(const TraceViewSet &set) const;
+      bool subsumed_by(const TraceViewSet &set,
+                       FailedPrecondition *condition = NULL) const;
       bool has_refinements(void) const;
       bool empty(void) const;
     public:
@@ -633,6 +635,9 @@ namespace Legion {
         Replayable(bool r, const char *m)
           : replayable(r), message(m)
         {}
+        Replayable(bool r, const std::string &m)
+          : replayable(r), message(m)
+        {}
         Replayable(const Replayable &r)
           : replayable(r.replayable), message(r.message)
         {}
@@ -649,6 +654,7 @@ namespace Legion {
       void propagate_merges(std::vector<unsigned> &gen);
       void transitive_reduction(void);
       void propagate_copies(std::vector<unsigned> &gen);
+      void eliminate_dead_code(std::vector<unsigned> &gen);
       void prepare_parallel_replay(const std::vector<unsigned> &gen);
       void push_complete_replays(void);
     public:
@@ -687,7 +693,8 @@ namespace Legion {
     public:
       virtual void record_mapper_output(Memoizable *memo,
                              const Mapper::MapTaskOutput &output,
-                             const std::deque<InstanceSet> &physical_instances);
+                             const std::deque<InstanceSet> &physical_instances,
+                             std::set<RtEvent> &applied_events);
       void get_mapper_output(SingleTask *task,
                              VariantID &chosen_variant,
                              TaskPriority &task_priority,
@@ -696,8 +703,10 @@ namespace Legion {
                              std::deque<InstanceSet> &physical_instances) const;
     public:
       virtual void record_get_term_event(Memoizable *memo);
-      void record_create_ap_user_event(ApUserEvent lhs, Memoizable *memo);
-      void record_trigger_event(ApUserEvent lhs, ApEvent rhs);
+      virtual void record_create_ap_user_event(ApUserEvent lhs, 
+                                               Memoizable *memo);
+      virtual void record_trigger_event(ApUserEvent lhs, ApEvent rhs,
+                                        Memoizable *memo);
     public:
       virtual void record_merge_events(ApEvent &lhs, 
                                        ApEvent rhs, Memoizable *memo);
@@ -799,6 +808,7 @@ namespace Legion {
     private:
       unsigned convert_event(const ApEvent &event);
       unsigned find_event(const ApEvent &event) const;
+      unsigned find_or_convert_event(const ApEvent &event);
       void insert_instruction(Instruction *inst);
     private:
       // Returns the set of last users for all <view,field mask,index expr>
@@ -812,8 +822,9 @@ namespace Legion {
                            const FieldMask &mask,
                            std::set<unsigned> &users);
     public:
-      ApEvent get_fence_completion(void)
-        { return fence_completion; }
+      inline ApEvent get_fence_completion(void) { return fence_completion; }
+      void record_remote_memoizable(Memoizable *memo);
+      void release_remote_memos(void);
     private:
       PhysicalTrace * const trace;
       volatile bool recording;
@@ -824,14 +835,16 @@ namespace Legion {
     private:
       std::map<TraceLocalID,Memoizable*> operations;
       std::map<TraceLocalID,std::pair<unsigned,bool/*task*/> > memo_entries;
+      // Remote memoizable objects that we have ownership for
+      std::vector<Memoizable*> remote_memos;
     private:
       CachedMappings cached_mappings;
       bool has_virtual_mapping;
     private:
-      ApEvent                    fence_completion;
-      std::vector<ApEvent>       events;
-      std::vector<ApUserEvent>   user_events;
-      std::map<ApEvent,unsigned> event_map;
+      ApEvent                         fence_completion;
+      std::vector<ApEvent>            events;
+      std::map<unsigned,ApUserEvent>  user_events;
+      std::map<ApEvent,unsigned>      event_map;
     private:
       std::vector<Instruction*>               instructions;
       std::vector<std::vector<Instruction*> > slices;
@@ -924,7 +937,7 @@ namespace Legion {
     protected:
       std::map<TraceLocalID, Memoizable*> &operations;
       std::vector<ApEvent> &events;
-      std::vector<ApUserEvent> &user_events;
+      std::map<unsigned,ApUserEvent> &user_events;
     public:
       const TraceLocalID owner;
     };

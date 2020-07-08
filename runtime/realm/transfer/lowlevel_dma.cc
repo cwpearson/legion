@@ -2565,13 +2565,13 @@ namespace Realm {
 	if(dst_is_remote) {
 	  // have to tell rdma to make a copy if we're using the temp buffer
 	  bool make_copy = (src_ptr == src_scratch_buffer);
-	  do_remote_reduce(dst_mem->me,
-			   dst_info.base_offset,
-			   redop_id, red_fold,
-			   src_ptr, num_elems,
-			   src_elem_size, redop->sizeof_rhs,
-			   rdma_sequence_id,
-			   make_copy);
+	  rdma_count += do_remote_reduce(dst_mem->me,
+					 dst_info.base_offset,
+					 redop_id, red_fold,
+					 src_ptr, num_elems,
+					 src_elem_size, redop->sizeof_rhs,
+					 rdma_sequence_id,
+					 make_copy);
 	} else {
 	  // case 2: destination is directly accessible
 	  void *dst_ptr = dst_mem->get_direct_ptr(dst_info.base_offset,
@@ -2897,18 +2897,26 @@ namespace Realm {
 	  TransferIterator::AddressInfo info;
 
 	  size_t max_bytes = (size_t)-1;
-	  // gpu memset supports 1d or 2d, but not 3d (yet)
-	  unsigned flags = TransferIterator::LINES_OK;
+	  unsigned flags = (TransferIterator::LINES_OK |
+			    TransferIterator::PLANES_OK);
 	  size_t act_bytes = iter->step(max_bytes, info, flags);
 	  assert(act_bytes >= 0);
 	  total_bytes += act_bytes;
 
-	  if(info.num_lines == 1) {
-	    gpu->fill_within_fb(info.base_offset, info.bytes_per_chunk,
-				fill_buffer, fill_size);
+	  if(info.num_planes == 1) {
+	    if(info.num_lines == 1) {
+	      gpu->fill_within_fb(info.base_offset, info.bytes_per_chunk,
+				  fill_buffer, fill_size);
+	    } else {
+	      gpu->fill_within_fb_2d(info.base_offset, info.line_stride,
+				     info.bytes_per_chunk, info.num_lines,
+				     fill_buffer, fill_size);
+	    }
 	  } else {
-	    gpu->fill_within_fb_2d(info.base_offset, info.line_stride,
+	    gpu->fill_within_fb_3d(info.base_offset, info.line_stride,
+				   info.plane_stride,
 				   info.bytes_per_chunk, info.num_lines,
+				   info.num_planes,
 				   fill_buffer, fill_size);
 	  }
 	}

@@ -750,7 +750,7 @@ namespace Realm {
       MergeEventPrecondition *p = &preconditions[num_preconditions++];
 
       // increment count first, then add the waiter
-      count_needed.fetch_add(1);
+      count_needed.fetch_add_acqrel(1);
       EventImpl::add_waiter(wait_for, p);
     }
 
@@ -771,7 +771,7 @@ namespace Realm {
 	}
       }
 
-      int count_left = count_needed.fetch_add(-1);
+      int count_left = count_needed.fetch_sub_acqrel(1);
 
       // Put the logging first to avoid segfaults
       log_event.debug() << "received trigger merged event=" << event_impl->make_event(finish_gen)
@@ -950,7 +950,7 @@ namespace Realm {
     }
 
     // creates an event that won't trigger until all input events have
-    /*static*/ Event GenEventImpl::merge_events(const std::vector<Event>& wait_for,
+    /*static*/ Event GenEventImpl::merge_events(span<const Event> wait_for,
 						bool ignore_faults)
     {
       if (wait_for.empty())
@@ -959,60 +959,40 @@ namespace Realm {
       //  interested in counts of 0, 1, or 2+ - also remember the first
       //  event we saw for the count==1 case
       int wait_count = 0;
-      Event first_wait;
-      for(std::vector<Event>::const_iterator it = wait_for.begin();
-	  (it != wait_for.end()) && (wait_count < 2);
-	  it++) {
+      size_t first_wait = 0;
+      for(size_t i = 0; (i < wait_for.size()) && (wait_count < 2); i++) {
 	bool poisoned = false;
-	if((*it).has_triggered_faultaware(poisoned)) {
+	if(wait_for[i].has_triggered_faultaware(poisoned)) {
           if(poisoned) {
 	    // if we're not ignoring faults, we need to propagate this fault, and can do
 	    //  so by just returning this poisoned event
 	    if(!ignore_faults) {
-	      log_poison.info() << "merging events - " << (*it) << " already poisoned";
-	      return *it;
+	      log_poison.info() << "merging events - " << wait_for[i] << " already poisoned";
+	      return wait_for[i];
 	    }
           }
 	} else {
-	  if(!wait_count) first_wait = *it;
+	  if(!wait_count) first_wait = i;
 	  wait_count++;
 	}
       }
       log_event.debug() << "merging events - at least " << wait_count << " not triggered";
 
-      // Avoid these optimizations if we are doing event graph tracing
-      // we also cannot return an input event directly in the (wait_count == 1) case
-      //  if we're ignoring faults
-#ifndef EVENT_GRAPH_TRACE
       // counts of 0 or 1 don't require any merging
       if(wait_count == 0) return Event::NO_EVENT;
-      if((wait_count == 1) && !ignore_faults) return first_wait;
-#else
-      if((wait_for.size() == 1) && !ignore_faults)
-        return *(wait_for.begin());
-#endif
+      if((wait_count == 1) && !ignore_faults) return wait_for[first_wait];
+
       // counts of 2+ require building a new event and a merger to trigger it
       GenEventImpl *event_impl = GenEventImpl::create_genevent();
       Event finish_event = event_impl->current_event();
       EventMerger *m = &(event_impl->merger);
 
-      m->prepare_merger(finish_event, ignore_faults, wait_for.size());
+      m->prepare_merger(finish_event, ignore_faults,
+			wait_for.size() - first_wait);
 
-#ifdef EVENT_GRAPH_TRACE
-      log_event_graph.info("Event Merge: (" IDFMT ",%d) %ld", 
-			   finish_event.id, finish_event.gen, wait_for.size());
-#endif
-
-      for(std::vector<Event>::const_iterator it = wait_for.begin();
-	  it != wait_for.end();
-	  it++) {
-	log_event.info() << "event merging: event=" << finish_event << " wait_on=" << *it;
-	m->add_precondition(*it);
-#ifdef EVENT_GRAPH_TRACE
-        log_event_graph.info("Event Precondition: (" IDFMT ",%d) (" IDFMT ",%d)",
-                             finish_event.id, finish_event.gen,
-                             it->id, it->gen);
-#endif
+      for(size_t i = first_wait; i < wait_for.size(); i++) {
+	log_event.info() << "event merging: event=" << finish_event << " wait_on=" << wait_for[i];
+	m->add_precondition(wait_for[i]);
       }
 
       // once they're all added - arm the thing (it might go off immediately)
@@ -2138,7 +2118,7 @@ static void *bytedup(const void *data, size_t datalen)
       }
 
     struct RemoteNotification {
-      unsigned node;
+      NodeID node;
       EventImpl::gen_t trigger_gen, previous_gen;
     };
 
@@ -2398,15 +2378,21 @@ static void *bytedup(const void *data, size_t datalen)
 	for(std::vector<RemoteNotification>::const_iterator it = remote_notifications.begin();
 	    it != remote_notifications.end();
 	    it++) {
+	  // normally we'll just send a remote waiter data up to the
+	  //  generation they asked for - the exception is the target of a
+	  //  migration, who must get up to date data
+	  gen_t tgt_trigger_gen = (*it).trigger_gen;
+	  if((*it).node == migration_target)
+	    tgt_trigger_gen = trigger_gen;
 	  log_barrier.info() << "sending remote trigger notification: " << me << "/"
-			     << (*it).previous_gen << " -> " << (*it).trigger_gen << ", dest=" << (*it).node;
+			     << (*it).previous_gen << " -> " << tgt_trigger_gen << ", dest=" << (*it).node;
 	  void *data = 0;
 	  size_t datalen = 0;
 	  if(final_values_copy) {
 	    data = (char *)final_values_copy + (((*it).previous_gen - oldest_previous) * redop->sizeof_lhs);
-	    datalen = ((*it).trigger_gen - (*it).previous_gen) * redop->sizeof_lhs;
+	    datalen = (tgt_trigger_gen - (*it).previous_gen) * redop->sizeof_lhs;
 	  }
-	  BarrierTriggerMessage::send_request((*it).node, me.id, (*it).trigger_gen, (*it).previous_gen,
+	  BarrierTriggerMessage::send_request((*it).node, me.id, tgt_trigger_gen, (*it).previous_gen,
 					      first_generation, redop_id, migration_target, base_arrival_count,
 					      data, datalen);
 	}
@@ -2791,7 +2777,10 @@ static void *bytedup(const void *data, size_t datalen)
 	    impl->value_capacity = new_capacity;
 	  }
 	  assert(datalen == (impl->redop->sizeof_lhs * (trigger_gen - args.previous_gen)));
-	  memcpy(impl->final_values + ((rel_gen - 1) * impl->redop->sizeof_lhs), data, datalen);
+	  assert(args.previous_gen >= impl->first_generation);
+	  memcpy(impl->final_values + ((args.previous_gen -
+					impl->first_generation) * impl->redop->sizeof_lhs),
+		 data, datalen);
 	}
 
 	// external waiters need to be signalled inside the lock
@@ -3235,7 +3224,7 @@ static void *bytedup(const void *data, size_t datalen)
 	// try to pop a waiter from the free list - this needs to use
 	//  CAS to accomodate unsynchronized pushes to the list, but the
 	//  mutex we hold prevents any other poppers (so no ABA problem)
-	waiter = first_free_waiter.load();
+	waiter = first_free_waiter.load_acquire();
 	while(waiter) {
 	  if(first_free_waiter.compare_exchange(waiter, waiter->next_free))
 	    break;
@@ -3269,24 +3258,33 @@ static void *bytedup(const void *data, size_t datalen)
 
   Event CompQueueImpl::get_local_progress_event(void)
   {
-    // check for non-empty queue first and return NO_EVENT
-    if(resizable) {
-      AutoLock<> al(mutex);
-      if(cur_events > 0) {
-	assert(local_progress_event == 0);
-	return Event::NO_EVENT;
-      }
-    } else {
-      if(rd_ptr.load() < commit_ptr.load()) {
-	// can't check has_progress_events in a race-free way
-	return Event::NO_EVENT;
-      }
-    }
+    // non-resizable queues can observe a non-empty queue and return NO_EVENT
+    //  without taking the lock
+    if(!resizable && (rd_ptr.load() < commit_ptr.load()))
+      return Event::NO_EVENT;
 
-    // take lock and create event if needed
     {
       AutoLock<> al(mutex);
 
+      // now that we hold the lock, check emptiness consistent with progress
+      //  event information
+      if(resizable) {
+	if(cur_events > 0) {
+	  assert(local_progress_event == 0);
+	  return Event::NO_EVENT;
+	}
+      } else {
+	// before we recheck in the non-resizable case, set the
+	//  'has_progress_events' flag - this ensures that any pusher we don't
+	//  see when we recheck the commit pointer will see the flag and take the
+	//  log to handle the progress event we're about to make
+	has_progress_events.store(true);
+	// commit load has to be fenced to stay after the store above
+	if(rd_ptr.load() < commit_ptr.load_fenced())
+	  return Event::NO_EVENT;
+      }
+
+      // we appear to be empty - get or create the progress event
       if(local_progress_event) {
 	ID id(local_progress_event->me);
 	id.event_generation() = local_progress_event_gen;
@@ -3297,7 +3295,6 @@ static void *bytedup(const void *data, size_t datalen)
 	Event e = local_progress_event->current_event();
 	// TODO: we probably don't really need this field because it's always local
 	local_progress_event_gen = ID(e).event_generation();
-	has_progress_events.store(true);
 	return e;
       }
     }
@@ -3307,25 +3304,34 @@ static void *bytedup(const void *data, size_t datalen)
   {
     // if queue is non-empty, we'll just immediately trigger the event
     bool immediate_trigger = false;
-    if(resizable) {
-      AutoLock<> al(mutex);
-      if(cur_events > 0) {
-	assert(local_progress_event == 0);
-	immediate_trigger = true;
-      }
+
+    // non-resizable queues can check without even taking the lock
+    if(!resizable && (rd_ptr.load() < commit_ptr.load())) {
+      immediate_trigger = true;
     } else {
-      if(rd_ptr.load() < commit_ptr.load()) {
-	// can't check has_progress_events in a race-free way
-	immediate_trigger = true;
-      }
-    }
-
-    if(!immediate_trigger) {
       AutoLock<> al(mutex);
-      remote_progress_events.push_back(event);
-      has_progress_events.store(true);
+
+      // now that we hold the lock, check emptiness consistent with progress
+      //  event information
+      if(resizable) {
+	if(cur_events > 0)
+	  immediate_trigger = true;
+      } else {
+	// before we recheck in the non-resizable case, set the
+	//  'has_progress_events' flag - this ensures that any pusher we don't
+	//  see when we recheck the commit pointer will see the flag and take the
+	//  log to handle the remote progress event we're about to add
+	has_progress_events.store(true);
+	// commit load has to be fenced to stay after the store above
+	if(rd_ptr.load() < commit_ptr.load_fenced())
+	  immediate_trigger = true;
+      }
+
+      if(!immediate_trigger)
+	remote_progress_events.push_back(event);
     }
 
+    // lock is released, so we can trigger now if needed
     if(immediate_trigger) {
       // the event is remote, but we know it's a GenEventImpl, so trigger here
       GenEventImpl::trigger(event, false /*!poisoned*/);
@@ -3403,7 +3409,7 @@ static void *bytedup(const void *data, size_t datalen)
       //  entries - this has to happen in the same order as the rd_ptr
       //  bumps though
       while(consume_ptr.load() != old_rd_ptr) { /*pause?*/ }
-      size_t check = consume_ptr.fetch_add(count);
+      size_t check = consume_ptr.fetch_add_acqrel(count);
       assert(check == old_rd_ptr);
 
       return count;
@@ -3477,7 +3483,7 @@ static void *bytedup(const void *data, size_t datalen)
 
       // bump commit pointer, but respecting order
       while(commit_ptr.load() != old_wr_ptr) { /*pause?*/ }
-      size_t check = commit_ptr.fetch_add(1);
+      size_t check = commit_ptr.fetch_add_acqrel(1);
       assert(check == old_wr_ptr);
 
       // lock-free insertion of waiter into free list
@@ -3491,8 +3497,9 @@ static void *bytedup(const void *data, size_t datalen)
 	}
       }
 
-      // see if we need to do any triggering
-      if(has_progress_events.load()) {
+      // see if we need to do any triggering - fenced load to keep it after the
+      //  update of commit_ptr above
+      if(has_progress_events.load_fenced()) {
 	// take lock for this
 	AutoLock<> al(mutex);
 	local_trigger = local_progress_event;

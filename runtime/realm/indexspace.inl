@@ -393,8 +393,8 @@ namespace Realm {
       SparsityMapPublicImpl<N,T> *impl = sparsity.impl();
 
       // if we don't have the data, it's too late - somebody should have waited
-      assert(impl->is_valid(precise) &&
-	     "IndexSpace<N,T>::tighten called without waiting for valid metadata");
+      REALM_ASSERT(impl->is_valid(precise),
+		   "IndexSpace<N,T>::tighten called without waiting for valid metadata");
 
       // always use precise info if it's available
       if(impl->is_valid(true /*precise*/)) {
@@ -806,6 +806,23 @@ namespace Realm {
 		requests, wait_on);
   }
 
+  // integer version of weighted subspace is a wrapper around size_t version
+  template <int N, typename T>
+  inline Event IndexSpace<N,T>::create_weighted_subspaces(size_t count, size_t granularity,
+							  const std::vector<int>& weights,
+							  std::vector<IndexSpace<N,T> >& subspaces,
+							  const ProfilingRequestSet &reqs,
+							  Event wait_on /*= Event::NO_EVENT*/) const
+  {
+    std::vector<size_t> weights_size_t(weights.size());
+
+    // clamp negative values to 0
+    for(size_t i = 0; i < weights.size(); i++)
+      weights_size_t[i] = (weights[i] > 0) ? weights[i] : 0;
+
+    return create_weighted_subspaces(count, granularity, weights_size_t,
+				     subspaces, reqs, wait_on);
+  }
 
   // simple wrapper for the multiple subspace version
   template <int N, typename T>

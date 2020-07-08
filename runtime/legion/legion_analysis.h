@@ -132,11 +132,13 @@ namespace Legion {
       virtual void pack_recorder(Serializer &rez, 
           std::set<RtEvent> &applied, const AddressSpaceID target) = 0; 
       virtual RtEvent get_collect_event(void) const = 0;
+      virtual PhysicalTraceRecorder* clone(Memoizable *memo) { return this; }
     public:
       virtual void record_get_term_event(Memoizable *memo) = 0;
       virtual void record_create_ap_user_event(ApUserEvent lhs, 
                                                Memoizable *memo) = 0;
-      virtual void record_trigger_event(ApUserEvent lhs, ApEvent rhs) = 0;
+      virtual void record_trigger_event(ApUserEvent lhs, ApEvent rhs,
+                                        Memoizable *memo) = 0;
     public:
       virtual void record_merge_events(ApEvent &lhs, 
                                        ApEvent rhs, Memoizable *memo) = 0;
@@ -193,7 +195,8 @@ namespace Legion {
       virtual void record_set_op_sync_event(ApEvent &lhs, Memoizable *memo) = 0;
       virtual void record_mapper_output(Memoizable *memo,
                          const Mapper::MapTaskOutput &output,
-                         const std::deque<InstanceSet> &physical_instances) = 0;
+                         const std::deque<InstanceSet> &physical_instances,
+                         std::set<RtEvent> &applied_events) = 0;
       virtual void get_reduction_ready_events(Memoizable *memo,
                                            std::set<ApEvent> &ready_events) = 0;
       virtual void record_set_effects(Memoizable *memo, ApEvent &rhs) = 0;
@@ -237,11 +240,13 @@ namespace Legion {
       virtual void pack_recorder(Serializer &rez, 
           std::set<RtEvent> &applied, const AddressSpaceID target);
       virtual RtEvent get_collect_event(void) const { return collect_event; }
+      virtual PhysicalTraceRecorder* clone(Memoizable *memo);
     public:
       virtual void record_get_term_event(Memoizable *memo);
       virtual void record_create_ap_user_event(ApUserEvent lhs, 
                                                Memoizable *memo);
-      virtual void record_trigger_event(ApUserEvent lhs, ApEvent rhs);
+      virtual void record_trigger_event(ApUserEvent lhs, ApEvent rhs,
+                                        Memoizable *memo);
     public:
       virtual void record_merge_events(ApEvent &lhs, 
                                        ApEvent rhs, Memoizable *memo);
@@ -298,7 +303,8 @@ namespace Legion {
       virtual void record_set_op_sync_event(ApEvent &lhs, Memoizable *memo);
       virtual void record_mapper_output(Memoizable *memo,
                           const Mapper::MapTaskOutput &output,
-                          const std::deque<InstanceSet> &physical_instances);
+                          const std::deque<InstanceSet> &physical_instances,
+                          std::set<RtEvent> &applied_events);
       virtual void get_reduction_ready_events(Memoizable *memo,
                                               std::set<ApEvent> &ready_events);
       virtual void record_set_effects(Memoizable *memo, ApEvent &rhs);
@@ -341,6 +347,7 @@ namespace Legion {
                                   std::set<RtEvent> &applied) const;
       static TraceInfo* unpack_remote_trace_info(Deserializer &derez,
                                     Operation *op, Runtime *runtime);
+      TraceInfo* clone(Operation *op);
     public:
       inline void record_get_term_event(void) const
         {
@@ -351,6 +358,11 @@ namespace Legion {
         {
           base_sanity_check();
           rec->record_create_ap_user_event(result, memo);
+        }
+      inline void record_trigger_event(ApUserEvent result, ApEvent rhs) const
+        {
+          base_sanity_check();
+          rec->record_trigger_event(result, rhs, memo);
         }
       inline void record_merge_events(ApEvent &result, 
                                       ApEvent e1, ApEvent e2) const
@@ -377,10 +389,11 @@ namespace Legion {
         }
       inline void record_mapper_output(Memoizable *local, 
                           const Mapper::MapTaskOutput &output,
-                          const std::deque<InstanceSet> &physical_instances)
+                          const std::deque<InstanceSet> &physical_instances,
+                          std::set<RtEvent> &applied)
         {
           base_sanity_check();
-          rec->record_mapper_output(local, output, physical_instances);
+          rec->record_mapper_output(local, output, physical_instances, applied);
         }
       inline void get_reduction_ready_events(Memoizable *local,
                                              std::set<ApEvent> &ready_events)
@@ -545,7 +558,7 @@ namespace Legion {
     class ProjectionInfo {
     public:
       ProjectionInfo(void)
-        : projection(NULL), projection_type(SINGULAR),
+        : projection(NULL), projection_type(LEGION_SINGULAR_PROJECTION),
           projection_space(NULL) { }
       ProjectionInfo(Runtime *runtime, const RegionRequirement &req,
                      IndexSpaceNode *launch_space);
@@ -596,54 +609,43 @@ namespace Legion {
     };  
 
     /**
-     * \struct ChildState
-     * Tracks the which fields have open children
-     * and then which children are open for each
-     * field. We also keep track of the children
-     * that are in the process of being closed
-     * to avoid races on two different operations
-     * trying to close the same child.
-     */
-    struct ChildState {
-    public:
-      ChildState(void) { }
-      ChildState(const FieldMask &m)
-        : valid_fields(m) { }
-      ChildState(const ChildState &rhs) 
-        : valid_fields(rhs.valid_fields),
-          open_children(rhs.open_children) { }
-    public:
-      ChildState& operator=(const ChildState &rhs)
-      {
-        valid_fields = rhs.valid_fields;
-        open_children = rhs.open_children;
-        return *this;
-      }
-    public:
-      FieldMask valid_fields;
-      LegionMap<LegionColor,FieldMask>::aligned open_children;
-    };
-
-    /**
      * \struct FieldState
      * Track the field state more accurately
      * for logical traversals to figure out 
      * which tasks can run in parallel.
      */
-    struct FieldState : public ChildState {
+    struct FieldState {
     public:
       FieldState(void);
       FieldState(const GenericUser &u, const FieldMask &m, 
-                 LegionColor child);
+                 RegionTreeNode *child, std::set<RtEvent> &applied);
       FieldState(const RegionUsage &u, const FieldMask &m,
                  ProjectionFunction *proj, IndexSpaceNode *proj_space, 
                  bool dis, bool dirty_reduction = false);
+      FieldState(const FieldState &rhs);
+      FieldState& operator=(const FieldState &rhs);
+      ~FieldState(void);
     public:
       inline bool is_projection_state(void) const 
         { return (open_state >= OPEN_READ_ONLY_PROJ); } 
+      inline const FieldMask& valid_fields(void) const 
+        { return open_children.get_valid_mask(); }
+      inline void move_to(FieldState &lhs)
+        {
+          open_children.swap(lhs.open_children);
+          lhs.open_state = open_state;
+          lhs.redop = redop;
+          lhs.projection = projection;
+          lhs.projection_space = projection_space;
+          lhs.rebuild_timeout = rebuild_timeout;
+        }
     public:
       bool overlaps(const FieldState &rhs) const;
-      void merge(const FieldState &rhs, RegionTreeNode *node);
+      void merge(FieldState &rhs, RegionTreeNode *node);
+      bool filter(const FieldMask &mask);
+      void add_child(RegionTreeNode *child,
+          const FieldMask &mask, std::set<RtEvent> &applied);
+      void remove_child(RegionTreeNode *child);
     public:
       bool projection_domain_dominates(IndexSpaceNode *next_space) const;
     public:
@@ -654,12 +656,23 @@ namespace Legion {
                        const FieldMask &capture_mask,
                        PartitionNode *node) const;
     public:
+      FieldMaskSet<RegionTreeNode> open_children;
       OpenState open_state;
       ReductionOpID redop;
       ProjectionFunction *projection;
       IndexSpaceNode *projection_space;
       unsigned rebuild_timeout;
     };  
+
+    // A helper class for containing field states
+    class FieldStateDeque : public LegionDeque<FieldState>::aligned {
+    public:
+      inline void emplace(FieldState &rhs)
+      {
+        this->resize(this->size() + 1);
+        rhs.move_to(this->back());
+      }
+    };
 
     /**
      * \class ProjectionEpoch
@@ -851,7 +864,7 @@ namespace Legion {
     public:
       virtual ~KDTree(void) { }
       virtual bool refine(std::vector<EquivalenceSet*> &subsets,
-                          const FieldMask &refinement_mask) = 0;
+          const FieldMask &refinement_mask, unsigned max_depth) = 0;
     };
 
     /**
@@ -873,7 +886,7 @@ namespace Legion {
       KDNode<DIM>& operator=(const KDNode<DIM> &rhs);
     public:
       virtual bool refine(std::vector<EquivalenceSet*> &subsets,
-                          const FieldMask &refinement_mask);
+                          const FieldMask &refinement_mask, unsigned max_depth);
     public:
       static Rect<DIM> get_bounds(IndexSpaceExpression *expr);
     public:
@@ -913,10 +926,12 @@ namespace Legion {
       MappingInstance get_mapping_instance(void) const;
       bool is_virtual_ref(void) const; 
     public:
-      // These methods are used by PhysicalRegion::Impl to hold
-      // valid references to avoid premature collection
-      void add_valid_reference(ReferenceSource source) const;
-      void remove_valid_reference(ReferenceSource source) const;
+      void add_resource_reference(ReferenceSource source) const;
+      void remove_resource_reference(ReferenceSource source) const;
+      void add_valid_reference(ReferenceSource source, 
+                               ReferenceMutator *mutator) const;
+      void remove_valid_reference(ReferenceSource source,
+                                  ReferenceMutator *mutator) const;
     public:
       Memory get_memory(void) const;
     public:
@@ -996,8 +1011,12 @@ namespace Legion {
       void unpack_references(Runtime *runtime, Deserializer &derez, 
                              std::set<RtEvent> &ready_events);
     public:
-      void add_valid_references(ReferenceSource source) const;
-      void remove_valid_references(ReferenceSource source) const;
+      void add_resource_references(ReferenceSource source) const;
+      void remove_resource_references(ReferenceSource source) const;
+      void add_valid_references(ReferenceSource source,
+                                ReferenceMutator *mutator) const;
+      void remove_valid_references(ReferenceSource source,
+                                   ReferenceMutator *mutator) const;
     public:
       void update_wait_on_events(std::set<ApEvent> &wait_on_events) const;
     public:
@@ -1376,9 +1395,11 @@ namespace Legion {
       public:
         static const LgTaskID TASK_ID = LG_DEFER_PERFORM_OUTPUT_TASK_ID;
       public:
-        DeferPerformOutputArgs(PhysicalAnalysis *ana);
+        DeferPerformOutputArgs(PhysicalAnalysis *ana, 
+                               const PhysicalTraceInfo &trace_info);
       public:
         PhysicalAnalysis *const analysis;
+        const PhysicalTraceInfo *trace_info;
         const RtUserEvent applied_event;
         const ApUserEvent effects_event;
       };
@@ -1511,7 +1532,7 @@ namespace Legion {
                                      Runtime *rt, AddressSpaceID previous);
     public:
       const ReductionOpID redop;
-      ValidInstAnalysis *const target;
+      ValidInstAnalysis *const target_analysis;
     };
 
     /**
@@ -1552,7 +1573,7 @@ namespace Legion {
                                      Runtime *rt, AddressSpaceID previous);
     public:
       const FieldMaskSet<InstanceView> valid_instances;
-      InvalidInstAnalysis *const target;
+      InvalidInstAnalysis *const target_analysis;
     };
 
     /**
@@ -1667,7 +1688,7 @@ namespace Legion {
       static void handle_remote_acquires(Deserializer &derez, Runtime *rt,
                                          AddressSpaceID previous); 
     public:
-      AcquireAnalysis *const target;
+      AcquireAnalysis *const target_analysis;
     };
 
     /**
@@ -1707,7 +1728,7 @@ namespace Legion {
                                          AddressSpaceID previous);
     public:
       const ApEvent precondition;
-      ReleaseAnalysis *const target;
+      ReleaseAnalysis *const target_analysis;
       const PhysicalTraceInfo trace_info;
     public:
       // Can only safely be accessed when analysis is locked
@@ -2105,6 +2126,16 @@ namespace Legion {
         const IndexSpaceExprID expr_id;
         const IndexSpace handle;
       };
+      struct DeferRemoveRefArgs : public LgTaskArgs<DeferRemoveRefArgs> {
+      public:
+        static const LgTaskID TASK_ID = LG_DEFER_REMOVE_EQ_REF_TASK_ID;
+      public:
+        DeferRemoveRefArgs(std::vector<IndexSpaceExpression*> *refs)
+          : LgTaskArgs<DeferRemoveRefArgs>(implicit_provenance),
+            references(refs) { }
+      public:
+        std::vector<IndexSpaceExpression*> *const references;
+      };
     protected:
       enum EqState {
         // Owner starts in the mapping state, goes to pending refinement
@@ -2124,16 +2155,22 @@ namespace Legion {
     protected:
       struct DisjointPartitionRefinement {
       public:
-        DisjointPartitionRefinement(IndexPartNode *p);
+        DisjointPartitionRefinement(EquivalenceSet *owner, IndexPartNode *p,
+                                    std::set<RtEvent> &applied_events);
+        DisjointPartitionRefinement(const DisjointPartitionRefinement &rhs,
+                                    std::set<RtEvent> &applied_events);
+        ~DisjointPartitionRefinement(void);
       public:
         inline const std::map<IndexSpaceNode*,EquivalenceSet*>& 
           get_children(void) const { return children; }
         inline bool is_refined(void) const 
           { return (total_child_volume == partition_volume); } 
+        inline size_t get_volume(void) const { return partition_volume; }
       public:
         void add_child(IndexSpaceNode *node, EquivalenceSet *child);
         EquivalenceSet* find_child(IndexSpaceNode *node) const;
       public:
+        const DistributedID owner_did;
         IndexPartNode *const partition;
       private:
         std::map<IndexSpaceNode*,EquivalenceSet*> children;
@@ -2367,6 +2404,7 @@ namespace Legion {
       static void handle_make_owner(const void *args);
       static void handle_merge_or_forward(const void *args);
       static void handle_deferred_response(const void *args, Runtime *runtime);
+      static void handle_deferred_remove_refs(const void *args);
       static void handle_equivalence_set_request(Deserializer &derez,
                             Runtime *runtime, AddressSpaceID source);
       static void handle_equivalence_set_response(Deserializer &derez,
@@ -2407,6 +2445,8 @@ namespace Legion {
       FieldMaskSet<CopyFillGuard> update_guards;
       // Keep track of the refinements that need to be done
       FieldMaskSet<EquivalenceSet> pending_refinements;
+      // Record which remote eq sets are being refined for the first time
+      std::set<EquivalenceSet*> remote_first_refinements;
       // Keep an event to track when the refinements are ready
       RtUserEvent transition_event;
       // An event to track when the refinement task is done on the owner

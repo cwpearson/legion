@@ -252,6 +252,13 @@ namespace Realm {
     //  profiling has been requested
     long long inline_start_time = reqs.empty() ? 0 : Clock::current_time_in_nanoseconds();
 
+    // partitioning an empty space and/or making a single subspace is easy
+    if(empty() || (count == 1)) {
+      subspaces.resize(count, *this);
+      PartitioningOperation::do_inline_profiling(reqs, inline_start_time);
+      return wait_on;
+    }
+
     // dense case is easy(er)
     if(dense()) {
       subspaces.reserve(count);
@@ -295,10 +302,10 @@ namespace Realm {
 
   template <int N, typename T>
   Event IndexSpace<N,T>::create_weighted_subspaces(size_t count, size_t granularity,
-						    const std::vector<int>& weights,
-						    std::vector<IndexSpace<N,T> >& subspaces,
-						    const ProfilingRequestSet &reqs,
-						    Event wait_on /*= Event::NO_EVENT*/) const
+						   const std::vector<size_t>& weights,
+						   std::vector<IndexSpace<N,T> >& subspaces,
+						   const ProfilingRequestSet &reqs,
+						   Event wait_on /*= Event::NO_EVENT*/) const
   {
     // output vector should start out empty
     assert(subspaces.empty());
@@ -306,6 +313,13 @@ namespace Realm {
     // record the start time of the potentially-inline operation if any
     //  profiling has been requested
     long long inline_start_time = reqs.empty() ? 0 : Clock::current_time_in_nanoseconds();
+
+    // partitioning an empty space and/or making a single subspace is easy
+    if(empty() || (count == 1)) {
+      subspaces.resize(count, *this);
+      PartitioningOperation::do_inline_profiling(reqs, inline_start_time);
+      return wait_on;
+    }
 
     // determine the total weight
     size_t total_weight = 0;
@@ -364,7 +378,30 @@ namespace Realm {
     return wait_on;
   }
 
+  template <int N, typename T>
+  bool IndexSpace<N,T>::compute_covering(size_t max_rects, int max_overhead,
+					 std::vector<Rect<N,T> >& covering) const
+  {
+    // handle really simple cases first
+    if(empty()) {
+      covering.clear();
+      return true;
+    }
 
+    if(dense()) {
+      covering.resize(1);
+      covering[0] = bounds;
+      return true;
+    }
+
+    // anything else requires sparsity data - we'd better have it
+    SparsityMapPublicImpl<N,T> *impl = sparsity.impl();
+    assert(impl->is_valid(true /*precise*/) &&
+	   "IndexSpace<N,T>::compute_covering called without waiting for valid metadata");
+
+    return impl->compute_covering(bounds, max_rects, max_overhead,
+				  covering);
+  }
 
 
   ////////////////////////////////////////////////////////////////////////

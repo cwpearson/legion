@@ -149,8 +149,8 @@ namespace Realm {
     IndexSpace(const Rect<N,T>& _bounds, SparsityMap<N,T> _sparsity);
 
     // construct an index space from a list of points or rects
-    IndexSpace(const std::vector<Point<N,T> >& points);
-    IndexSpace(const std::vector<Rect<N,T> >& rects);
+    explicit IndexSpace(const std::vector<Point<N,T> >& points);
+    explicit IndexSpace(const std::vector<Rect<N,T> >& rects);
 
     // constructs a guaranteed-empty index space
     static IndexSpace<N,T> make_empty(void);
@@ -199,6 +199,44 @@ namespace Realm {
     //   actual volume)
     size_t volume_approx(void) const;
 
+    // attempts to compute a set of covering rectangles for the index space
+    //  with the following properties:
+    // a) every point in the index space is included in (exactly) one rect
+    // b) none of the resulting rectangles overlap each other
+    // c) no more than 'max_rects' rectangles are used (0 = no limit)
+    // d) the relative storage overhead (%) is less than 'max_overhead'
+    //     i.e. 100*(volume(covering)/volume(space) - 1) <= max_overhead
+    //
+    // if successful, this function returns true and fills in 'covering'
+    //   vector
+    // if unsuccessful, it returns false and leaves 'covering' unchanged
+    //
+    // for N=1 (i.e. 1-D index spaces), this function is optimal, returning
+    //  a zero-overhead covering using a minimal number of rectangles if
+    //  that satisfies the 'max_rects' bound, or a covering (using
+    //  'max_rects' rectangles) with minimal overhead if that overhead is
+    //  acceptable, or fails if no covering exists
+    //
+    // for N>1, heuristics are used, and the guarantees are much weaker:
+    // a) a request with 'max_rects'==1 will precisely compute the overhead
+    //   and succeed/fail appropriately
+    // b) a request with 'max_rects'== 0 (no limit) will always succeed with
+    //   zero overhead, although the number of rectangles used may not be
+    //   minimal
+    // c) the computational complexity of the attempt will bounded at:
+    //      O(nm log m + nmk^2), where:
+    //         n = dimension of index space
+    //         m = size of exact internal representation (which itself is
+    //               computed by heuristics and may not be optimal for some
+    //               dependent-partitioning results)
+    //         k = maximum output rectangles
+    //      this allows for sorting the inputs and/or outputs as well as
+    //       dynamic programming approaches but precludes more "heroic"
+    //       optimizations - a use case that requires better results and/or
+    //       admits specific optimizations will need to compute its own
+    //       coverings
+    bool compute_covering(size_t max_rects, int max_overhead,
+			  std::vector<Rect<N,T> >& covering) const;
 
     // as an alternative to IndexSpaceIterator's, this will internally iterate over rectangles
     //  and call your callable/lambda for each subrectangle
@@ -256,6 +294,12 @@ namespace Realm {
 
     Event create_weighted_subspaces(size_t count, size_t granularity,
 				    const std::vector<int>& weights,
+				    std::vector<IndexSpace<N,T> >& subspaces,
+				    const ProfilingRequestSet &reqs,
+				    Event wait_on = Event::NO_EVENT) const;
+
+    Event create_weighted_subspaces(size_t count, size_t granularity,
+				    const std::vector<size_t>& weights,
 				    std::vector<IndexSpace<N,T> >& subspaces,
 				    const ProfilingRequestSet &reqs,
 				    Event wait_on = Event::NO_EVENT) const;
@@ -483,6 +527,55 @@ namespace Realm {
 
   template <int N, typename T>
   std::ostream& operator<<(std::ostream& os, const IndexSpace<N,T>& p);
+
+  // a type-erased IndexSpace that can be used to avoid template explosion
+  //  at the cost of run-time indirection - avoid using this in
+  //  performance-critical code
+  class IndexSpaceGenericImpl;
+
+  class IndexSpaceGeneric {
+  public:
+    IndexSpaceGeneric();
+    IndexSpaceGeneric(const IndexSpaceGeneric& copy_from);
+
+    template <int N, typename T>
+    IndexSpaceGeneric(const IndexSpace<N,T>& copy_from);
+
+    ~IndexSpaceGeneric();
+
+    IndexSpaceGeneric& operator=(const IndexSpaceGeneric& copy_from);
+
+    template <int N, typename T>
+    IndexSpaceGeneric& operator=(const IndexSpace<N,T>& copy_from);
+
+    template <int N, typename T>
+    const IndexSpace<N,T>& as_index_space() const;
+
+    // only IndexSpace method exposed directly is copy
+    Event copy(const std::vector<CopySrcDstField> &srcs,
+	       const std::vector<CopySrcDstField> &dsts,
+	       const ProfilingRequestSet &requests,
+	       Event wait_on = Event::NO_EVENT) const;
+
+    template <int N, typename T>
+    Event copy(const std::vector<CopySrcDstField> &srcs,
+	       const std::vector<CopySrcDstField> &dsts,
+	       const std::vector<const typename CopyIndirection<N,T>::Base *> &indirects,
+	       const ProfilingRequestSet &requests,
+	       Event wait_on = Event::NO_EVENT) const;
+
+  protected:
+    IndexSpaceGenericImpl *impl;
+
+    // would like to use sizeof(IndexSpace<REALM_MAX_DIM, size_t>) here,
+    //  but that requires the specializations that are defined in the
+    //  include of indexspace.inl below...
+    static const size_t STORAGE_BYTES = (2*REALM_MAX_DIM + 2) * sizeof(size_t);
+    typedef char Storage_unaligned[STORAGE_BYTES];
+    REALM_ALIGNED_TYPE_SAMEAS(Storage_aligned, Storage_unaligned, size_t);
+    Storage_aligned raw_storage;
+
+  };
 
   // instances are based around the concept of a "linearization" of some index space, which is
   //  responsible for mapping (valid) points in the index space into a hopefully-fairly-dense

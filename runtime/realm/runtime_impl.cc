@@ -816,7 +816,6 @@ namespace Realm {
 	nodes(0),
 	local_event_free_list(0), local_barrier_free_list(0),
 	local_reservation_free_list(0),
-	local_proc_group_free_list(0),
 	local_compqueue_free_list(0),
 	//local_sparsity_map_free_list(0),
 	run_method_called(false),
@@ -1187,7 +1186,7 @@ namespace Realm {
       sampling_profiler.configure_from_cmdline(cmdline, *core_reservations);
 
       // initialize barrier timestamp
-      BarrierImpl::barrier_adjustment_timestamp = (((Barrier::timestamp_t)(Network::my_node_id)) << BarrierImpl::BARRIER_TIMESTAMP_NODEID_SHIFT) + 1;
+      BarrierImpl::barrier_adjustment_timestamp.store((((Barrier::timestamp_t)(Network::my_node_id)) << BarrierImpl::BARRIER_TIMESTAMP_NODEID_SHIFT) + 1);
 
       nodes = new Node[Network::max_node_id + 1];
 
@@ -1217,15 +1216,33 @@ namespace Realm {
 	local_event_free_list = new LocalEventTableAllocator::FreeList(local_events, Network::my_node_id);
 	local_barrier_free_list = new BarrierTableAllocator::FreeList(n.barriers, Network::my_node_id);
 	local_reservation_free_list = new ReservationTableAllocator::FreeList(n.reservations, Network::my_node_id);
-	local_proc_group_free_list = new ProcessorGroupTableAllocator::FreeList(n.proc_groups, Network::my_node_id);
 	local_compqueue_free_list = new CompQueueTableAllocator::FreeList(n.compqueues, Network::my_node_id);
 
 	local_sparsity_map_free_lists.resize(Network::max_node_id + 1);
 	for(NodeID i = 0; i <= Network::max_node_id; i++) {
-	  nodes[i].sparsity_maps.resize(Network::max_node_id + 1, 0);
+	  nodes[i].sparsity_maps.resize(Network::max_node_id + 1,
+					atomic<DynamicTable<SparsityMapTableAllocator> *>(0));
 	  DynamicTable<SparsityMapTableAllocator> *m = new DynamicTable<SparsityMapTableAllocator>;
-	  nodes[i].sparsity_maps[Network::my_node_id] = m;
+	  nodes[i].sparsity_maps[Network::my_node_id].store(m);
 	  local_sparsity_map_free_lists[i] = new SparsityMapTableAllocator::FreeList(*m, i /*owner_node*/);
+	}
+
+	local_subgraph_free_lists.resize(Network::max_node_id + 1);
+	for(NodeID i = 0; i <= Network::max_node_id; i++) {
+	  nodes[i].subgraphs.resize(Network::max_node_id + 1,
+				    atomic<DynamicTable<SubgraphTableAllocator> *>(0));
+	  DynamicTable<SubgraphTableAllocator> *m = new DynamicTable<SubgraphTableAllocator>;
+	  nodes[i].subgraphs[Network::my_node_id].store(m);
+	  local_subgraph_free_lists[i] = new SubgraphTableAllocator::FreeList(*m, i /*owner_node*/);
+	}
+
+	local_proc_group_free_lists.resize(Network::max_node_id + 1);
+	for(NodeID i = 0; i <= Network::max_node_id; i++) {
+	  nodes[i].proc_groups.resize(Network::max_node_id + 1,
+				    atomic<DynamicTable<ProcessorGroupTableAllocator> *>(0));
+	  DynamicTable<ProcessorGroupTableAllocator> *m = new DynamicTable<ProcessorGroupTableAllocator>;
+	  nodes[i].proc_groups[Network::my_node_id].store(m);
+	  local_proc_group_free_lists[i] = new ProcessorGroupTableAllocator::FreeList(*m, i /*owner_node*/);
 	}
       }
 
@@ -2181,15 +2198,26 @@ namespace Realm {
 	      it != n.sparsity_maps.end();
 	      ++it)
 	    delete it->load();
+
+	  for(std::vector<atomic<DynamicTable<SubgraphTableAllocator> *> >::iterator it = n.subgraphs.begin();
+	      it != n.subgraphs.end();
+	      ++it)
+	    delete it->load();
+
+	  for(std::vector<atomic<DynamicTable<ProcessorGroupTableAllocator> *> >::iterator it = n.proc_groups.begin();
+	      it != n.proc_groups.end();
+	      ++it)
+	    delete it->load();
 	}
 	
 	delete[] nodes;
 	delete local_event_free_list;
 	delete local_barrier_free_list;
 	delete local_reservation_free_list;
-	delete local_proc_group_free_list;
 	delete local_compqueue_free_list;
 	delete_container_contents(local_sparsity_map_free_lists);
+	delete_container_contents(local_subgraph_free_lists);
+	delete_container_contents(local_proc_group_free_lists);
 
 	// same for code translators
 	delete_container_contents(code_translators);
@@ -2314,6 +2342,36 @@ namespace Realm {
       return wrap;
     }
 
+    SubgraphImpl *RuntimeImpl::get_subgraph_impl(ID id)
+    {
+      if(!id.is_subgraph()) {
+	log_runtime.fatal() << "invalid subgraph handle: id=" << id;
+	assert(0 && "invalid subgraph handle");
+      }
+
+      Node *n = &nodes[id.subgraph_owner_node()];
+      atomic<DynamicTable<SubgraphTableAllocator> *>& m = n->subgraphs[id.subgraph_creator_node()];
+      // might need to construct this (in a lock-free way)
+      DynamicTable<SubgraphTableAllocator> *mptr = m.load();
+      if(mptr == 0) {
+	// construct one and try to swap it in
+	DynamicTable<SubgraphTableAllocator> *newm = new DynamicTable<SubgraphTableAllocator>;
+	if(m.compare_exchange(mptr, newm))
+	  mptr = newm;  // we're using the one we made
+	else
+	  delete newm;  // somebody else made it faster (mptr has winner)
+      }
+      SubgraphImpl *impl = mptr->lookup_entry(id.subgraph_subgraph_idx(),
+					      id.subgraph_owner_node());
+      // creator node isn't always right, so try to fix it
+      if(impl->me != id) {
+	if(impl->me.subgraph_creator_node() == 0)
+	  impl->me.subgraph_creator_node() = NodeID(id.subgraph_creator_node());
+	assert(impl->me == id);
+      }
+      return impl;
+    }
+  
     ReservationImpl *RuntimeImpl::get_lock_impl(ID id)
     {
       if(id.is_reservation()) {
@@ -2379,7 +2437,7 @@ namespace Realm {
       return null_check(nodes[id.proc_owner_node()].processors[id.proc_proc_idx()]);
     }
 
-    ProcessorGroup *RuntimeImpl::get_procgroup_impl(ID id)
+    ProcessorGroupImpl *RuntimeImpl::get_procgroup_impl(ID id)
     {
       if(!id.is_procgroup()) {
 	log_runtime.fatal() << "invalid processor group handle: id=" << id;
@@ -2387,9 +2445,28 @@ namespace Realm {
       }
 
       Node *n = &nodes[id.pgroup_owner_node()];
-      ProcessorGroup *impl = n->proc_groups.lookup_entry(id.pgroup_pgroup_idx(),
-							 id.pgroup_owner_node());
-      assert(impl->me == id.convert<Processor>());
+      atomic<DynamicTable<ProcessorGroupTableAllocator> *>& m = n->proc_groups[id.pgroup_creator_node()];
+      // might need to construct this (in a lock-free way)
+      DynamicTable<ProcessorGroupTableAllocator> *mptr = m.load();
+      if(mptr == 0) {
+	// construct one and try to swap it in
+	DynamicTable<ProcessorGroupTableAllocator> *newm = new DynamicTable<ProcessorGroupTableAllocator>;
+	if(m.compare_exchange(mptr, newm))
+	  mptr = newm;  // we're using the one we made
+	else
+	  delete newm;  // somebody else made it faster (mptr has winner)
+      }
+      ProcessorGroupImpl *impl = mptr->lookup_entry(id.pgroup_pgroup_idx(),
+						    id.pgroup_owner_node());
+      // creator node isn't always right, so try to fix it
+      if(ID(impl->me) != id) {
+	ID fixed = impl->me;
+	if(fixed.pgroup_creator_node() == 0) {
+	  fixed.pgroup_creator_node() = NodeID(id.pgroup_creator_node());
+	  impl->me = fixed.convert<Processor>();
+	}
+	assert(impl->me == id.convert<Processor>());
+      }
       return impl;
     }
 

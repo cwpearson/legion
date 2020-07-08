@@ -92,7 +92,8 @@ local function convert_lua_value(cx, node, value, allow_lists)
     terralib.isoverloadedfunction(value) or
     terralib.ismacro(value) or
     terralib.types.istype(value) or
-    std.is_task(value) or std.is_math_fn(value)
+    std.is_task(value) or std.is_math_fn(value) or
+    std.is_macro(value)
   then
     return ast.specialized.expr.Function {
       value = value,
@@ -556,19 +557,25 @@ end
 function specialize.expr_field_access(cx, node, allow_lists)
   local value = specialize.expr(cx, node.value)
 
-  local fields = data.flatmap(function(field_name)
-    return specialize.field_names(cx, field_name)
-  end, node.field_names)
+  assert(#node.field_names == 1)
+  local field_names = specialize.field_names(cx, node.field_names[1])
+
+  if type(field_names[1]) == "string" then
+    if #field_names > 1 then
+      report.error(expr, "multi-field access is not allowed")
+    end
+    field_names = field_names[1]
+  end
 
   if value:is(ast.specialized.expr.LuaTable) then
-    if #fields > 1 then
+    if type(field_names) ~= "string" then
       report.error(node, "unable to specialize multi-field access")
     end
-    return convert_lua_value(cx, node, value.value[fields[1]])
+    return convert_lua_value(cx, node, value.value[field_names])
   else
     return ast.specialized.expr.FieldAccess {
       value = value,
-      field_name = fields,
+      field_name = field_names,
       annotations = node.annotations,
       span = node.span,
     }
@@ -622,6 +629,7 @@ function specialize.expr_call(cx, node, allow_lists)
     terralib.ismacro(fn.value) or
     std.is_task(fn.value) or
     std.is_math_fn(fn.value) or
+    std.is_macro(fn.value) or
     type(fn.value) == "cdata"
   then
     if not std.is_task(fn.value) and #node.conditions > 0 then
@@ -735,6 +743,15 @@ end
 function specialize.expr_raw_fields(cx, node, allow_lists)
   return ast.specialized.expr.RawFields {
     region = specialize.expr_region_root(cx, node.region),
+    annotations = node.annotations,
+    span = node.span,
+  }
+end
+
+function specialize.expr_raw_future(cx, node, allow_lists)
+  return ast.specialized.expr.RawFuture {
+    value_type = node.value_type_expr(cx.env:env()),
+    value = specialize.expr(cx, node.value),
     annotations = node.annotations,
     span = node.span,
   }
@@ -1332,6 +1349,9 @@ function specialize.expr(cx, node, allow_lists)
 
   elseif node:is(ast.unspecialized.expr.RawFields) then
     return specialize.expr_raw_fields(cx, node, allow_lists)
+
+  elseif node:is(ast.unspecialized.expr.RawFuture) then
+    return specialize.expr_raw_future(cx, node, allow_lists)
 
   elseif node:is(ast.unspecialized.expr.RawPhysical) then
     return specialize.expr_raw_physical(cx, node, allow_lists)
@@ -2063,7 +2083,7 @@ end
 function specialize.top_task(cx, node)
   local cx = cx:new_local_scope()
 
-  local task = std.new_task(node.name)
+  local task = std.new_task(node.name, node.span)
 
   if node.body then
     local variant = task:make_variant("primary")
@@ -2172,6 +2192,7 @@ function specialize.top_quote_expr(cx, node)
   local cx = cx:new_local_scope(true)
   return std.newrquote(ast.specialized.top.QuoteExpr {
     expr = specialize.expr(cx, node.expr),
+    expr_type = false,
     annotations = node.annotations,
     span = node.span,
   })

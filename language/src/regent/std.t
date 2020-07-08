@@ -27,6 +27,8 @@ local pretty = require("regent/pretty")
 local profile = require("regent/profile")
 local report = require("common/report")
 
+local log_task_id = log.make_logger("task_id")
+
 local std = {}
 
 std.config, std.args = base.config, base.args
@@ -1739,8 +1741,44 @@ function rquote:getast()
   return self.ast
 end
 
+function rquote:gettype()
+  assert(self.ast.expr_type)
+  return self.ast.expr_type
+end
+
 function rquote:__tostring()
   return self.ast:tostring(true)
+end
+
+-- #####################################
+-- ## Macros
+-- #################
+
+local rmacro = {}
+function rmacro:__index(field)
+  local value = rmacro[field]
+  if value ~= nil then return value end
+  error("macro has no field '" .. field .. "' (in lookup)", 2)
+end
+
+function rmacro:__newindex(field, value)
+  error("macro has no field '" .. field .. "' (in assignment)", 2)
+end
+
+function std.macro(fn)
+  assert(fn ~= nil)
+
+  return setmetatable({
+    fn = fn,
+  }, rmacro)
+end
+
+function std.is_macro(x)
+  return getmetatable(x) == rmacro
+end
+
+function rmacro:__tostring()
+  return "macro(" .. tostring(self.fn) .. ")"
 end
 
 -- #####################################
@@ -2572,7 +2610,7 @@ do
       local ispace = self.ispace_symbol:gettype()
       assert(terralib.types.istype(ispace) and
                std.is_ispace(ispace),
-             "Parition type requires ispace")
+             "Partition type requires ispace")
       return ispace
     end
 
@@ -2688,14 +2726,14 @@ do
     if region_symbol:hastype() then
       assert(terralib.types.istype(region_symbol:gettype()) and
                std.is_region(region_symbol:gettype()),
-             "Parition type requires region")
+             "Partition type requires region")
     end
     assert(std.is_symbol(colors_symbol),
            "Partition type requires colors to be a symbol")
     if colors_symbol:hastype() then
       assert(terralib.types.istype(colors_symbol:gettype()) and
                std.is_ispace(colors_symbol:gettype()),
-             "Parition type requires colors")
+             "Partition type requires colors")
     end
 
     local st = terralib.types.newstruct("partition")
@@ -2727,7 +2765,7 @@ do
       local region = self.parent_region_symbol:gettype()
       assert(terralib.types.istype(region) and
                std.is_region(region),
-             "Parition type requires region")
+             "Partition type requires region")
       return region
     end
 
@@ -2735,7 +2773,7 @@ do
       local colors = self.colors_symbol:gettype()
       assert(terralib.types.istype(colors) and
                std.is_ispace(colors),
-             "Parition type requires colors")
+             "Partition type requires colors")
       return colors
     end
 
@@ -4042,6 +4080,8 @@ function std.setup(main_task, extra_setup_thunk, task_wrappers, registration_nam
     function(variant)
       local task = variant.task
 
+      log_task_id:info("%s: %s", task:get_name():concat("."), task:get_task_id())
+
       local options = variant:get_config_options()
 
       local proc_types = {c.LOC_PROC, c.IO_PROC}
@@ -4479,6 +4519,16 @@ local function compile_tasks_in_parallel()
 end
 
 function std.start(main_task, extra_setup_thunk)
+  if not std.is_task(main_task) then
+    report.error(
+        { span = ast.trivial_span() },
+        'invalid task to regentlib.start')
+  end
+  if #main_task:get_param_symbols() > 0 then
+    report.error(
+        { span = main_task.span },
+        'toplevel task must not have any parameter')
+  end
   if std.config["pretty"] then
     profile.print_summary()
     os.exit()
@@ -4547,6 +4597,16 @@ local function infer_filetype(filename)
 end
 
 function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flags)
+  if not std.is_task(main_task) then
+    report.error(
+        { span = ast.trivial_span() },
+        'invalid task to regentlib.saveobj')
+  end
+  if #main_task:get_param_symbols() > 0 then
+    report.error(
+        { span = main_task.span },
+        'toplevel task must not have any parameter')
+  end
   assert(std.is_task(main_task))
   filetype = filetype or infer_filetype(filename)
   assert(not link_flags or filetype == 'sharedlibrary' or filetype == 'executable',

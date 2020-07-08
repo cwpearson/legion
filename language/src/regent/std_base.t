@@ -76,13 +76,13 @@ local c = terralib.includecstring([[
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-]], {"-DLEGION_REDOP_COMPLEX"})
+]])
 base.c = c
 
 -- Hack: Terra's parser isn't smart enough to read the value of
 -- AUTO_GENERATE_ID, so just force it here so we don't have to
 -- hard-code its value elsewhere in the compiler.
-c.AUTO_GENERATE_ID = max_value(int32)
+c.AUTO_GENERATE_ID = -1
 
 local max_dim = c.LEGION_MAX_DIM
 base.max_dim = max_dim
@@ -239,6 +239,12 @@ function base.quote_binary_op(op, lhs, rhs)
     return `([lhs] < [rhs])
   elseif op == ">" then
     return `([lhs] > [rhs])
+  elseif op == "^" then
+    return `([lhs] ^ [rhs])
+  elseif op == "<<" then
+    return `([lhs] << [rhs])
+  elseif op == ">>" then
+    return `([lhs] >> [rhs])
   elseif op == "<=" then
     return `([lhs] <= [rhs])
   elseif op == ">=" then
@@ -1541,7 +1547,7 @@ end
 
 do
   local next_task_id = base.initial_regent_task_id
-  function base.new_task(name)
+  function base.new_task(name, span)
     if type(name) == "string" then
       name = data.newtuple(name)
     elseif data.is_tuple(name) then
@@ -1554,6 +1560,7 @@ do
     next_task_id = next_task_id + 1
     return setmetatable({
       name = name,
+      span = span,
       taskid = terralib.constant(c.legion_task_id_t, task_id),
       variants = terralib.newlist(),
       calling_convention = false,

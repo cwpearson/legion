@@ -11,6 +11,12 @@
 //  by any other parts of Realm, or it will mess up the ability to let an app link
 //  against the real libcudart.so
 
+// explicitly include cuda runtime, enabling deprecated things because we're
+//  implementing whatever exists, even if it is deprecated - this must precede
+//  any transitive inclusion of cuda_runtime.h below
+#define CUDA_ENABLE_DEPRECATED
+#include <cuda_runtime.h>
+
 #include "realm/cuda/cudart_hijack.h"
 
 #include "realm/cuda/cuda_module.h"
@@ -313,6 +319,16 @@ namespace Realm {
       }
 #endif
 
+      cudaError_t cudaMemGetInfo(size_t *free, size_t *total)
+      {
+	/*GPUProcessor *p =*/ get_gpu_or_die("cudaMalloc");
+
+	CUresult ret = cuMemGetInfo(free, total);
+	if(ret == CUDA_SUCCESS) return cudaSuccess;
+	assert(ret == CUDA_ERROR_INVALID_VALUE);
+	return cudaErrorInvalidValue;
+      }
+
       cudaError_t cudaMalloc(void **ptr, size_t size)
       {
 	/*GPUProcessor *p =*/ get_gpu_or_die("cudaMalloc");
@@ -344,6 +360,106 @@ namespace Realm {
         if (ret == CUDA_SUCCESS) return cudaSuccess;
         assert(ret == CUDA_ERROR_OUT_OF_MEMORY);
         return cudaErrorMemoryAllocation;
+      }
+
+      cudaError_t cudaPointerGetAttributes(cudaPointerAttributes *attr,
+					   const void *ptr)
+      {
+	get_gpu_or_die("cudaPointerGetAttributes");
+
+	unsigned mtype = 0;
+	CUdeviceptr dptr = 0;
+	void *hptr = 0;
+	int ordinal = 0;
+	bool managed = false;
+	CUresult res = cuPointerGetAttribute(&mtype,
+					     CU_POINTER_ATTRIBUTE_MEMORY_TYPE,
+					     (CUdeviceptr)ptr);
+	if(res == CUDA_ERROR_INVALID_VALUE)
+	  return cudaErrorInvalidValue;
+	assert(res == CUDA_SUCCESS);
+
+	CHECK_CU( cuPointerGetAttribute(&dptr,
+					CU_POINTER_ATTRIBUTE_DEVICE_POINTER,
+					(CUdeviceptr)ptr) );
+	CHECK_CU( cuPointerGetAttribute(&hptr,
+					CU_POINTER_ATTRIBUTE_HOST_POINTER,
+					(CUdeviceptr)ptr) );
+#if CUDART_VERSION >= 9200
+	CHECK_CU( cuPointerGetAttribute(&ordinal,
+					CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+					(CUdeviceptr)ptr) );
+#else
+	CUcontext ctx;
+	CHECK_CU( cuPointerGetAttribute(&ctx,
+					CU_POINTER_ATTRIBUTE_CONTEXT,
+					(CUdeviceptr)ptr) );
+	CHECK_CU( cuCtxPushCurrent(ctx) );
+	CHECK_CU( cuCtxGetDevice(&ordinal) );
+	CHECK_CU( cuCtxPopCurrent(&ctx) );
+#endif
+	CHECK_CU( cuPointerGetAttribute(&managed,
+					CU_POINTER_ATTRIBUTE_IS_MANAGED,
+					(CUdeviceptr)ptr) );
+
+	if(managed) {
+#if CUDART_VERSION < 11000
+	  attr->memoryType = cudaMemoryTypeDevice;
+#endif
+#if CUDART_VERSION >= 10000
+	  attr->type = cudaMemoryTypeManaged;
+#endif
+#if CUDART_VERSION < 11000
+	  attr->isManaged = 1;
+#endif
+	} else {
+#if CUDART_VERSION < 11000
+	  attr->isManaged = 0;
+#endif
+	  switch(mtype) {
+	  case CU_MEMORYTYPE_HOST: {
+#if CUDART_VERSION < 11000
+	    attr->memoryType = cudaMemoryTypeHost;
+#endif
+#if CUDART_VERSION >= 10000
+	    attr->type = cudaMemoryTypeHost;
+#endif
+	    break;
+	  }
+	  case CU_MEMORYTYPE_DEVICE: {
+#if CUDART_VERSION < 11000
+	    attr->memoryType = cudaMemoryTypeDevice;
+#endif
+#if CUDART_VERSION >= 10000
+	    attr->type = cudaMemoryTypeDevice;
+#endif
+	    break;
+	  }
+	  default:
+	    assert(0);
+	  }
+	}
+
+	attr->device = ordinal;
+	attr->devicePointer = (void *)dptr;
+	attr->hostPointer = hptr;
+
+	return cudaSuccess;
+      }
+
+      cudaError_t cudaMemPrefetchAsync(const void *dev_ptr,
+				       size_t count,
+				       int dst_device,
+				       cudaStream_t stream)
+      {
+        GPUProcessor *p = get_gpu_or_die("cudaMemPrefetchAsync");
+
+	if(stream == 0)
+	  stream = p->gpu->get_null_task_stream()->get_stream();
+
+	CHECK_CU( cuMemPrefetchAsync((CUdeviceptr)dev_ptr, count,
+				     dst_device, stream) );
+	return cudaSuccess;
       }
 #endif
 
@@ -381,6 +497,23 @@ namespace Realm {
 	GPUProcessor *p = get_gpu_or_die("cudaMemcpyAsync");
 	p->gpu_memcpy_async(dst, src, size, kind, stream);
 	return cudaSuccess;
+      }
+
+      cudaError_t cudaMemcpy2D(void *dst, size_t dpitch, const void *src, size_t spitch,
+                               size_t width, size_t height, cudaMemcpyKind kind)
+      {
+        GPUProcessor *p = get_gpu_or_die("cudaMemcpy2D");
+        p->gpu_memcpy2d(dst, dpitch, src, spitch, width, height, kind);
+        return cudaSuccess;
+      }
+
+      cudaError_t cudaMemcpy2DAsync(void *dst, size_t dpitch, const void *src, 
+                                    size_t spitch, size_t width, size_t height, 
+                                    cudaMemcpyKind kind, cudaStream_t stream)
+      {
+        GPUProcessor *p = get_gpu_or_die("cudaMemcpy2DAsync");
+        p->gpu_memcpy2d_async(dst, dpitch, src, spitch, width, height, kind, stream);
+        return cudaSuccess;
       }
 
       cudaError_t cudaMemset(void *dst, int value, size_t count)

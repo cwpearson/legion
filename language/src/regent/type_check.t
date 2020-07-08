@@ -896,6 +896,28 @@ function type_check.expr_call(cx, node)
     conditions:insertall(type_check.expr_condition(cx, condition))
   end
 
+  -- For macros, run macro expansion and type check the result.
+  if std.is_macro(fn.value) then
+    local quotes = data.mapi(
+      function(i, arg)
+        return std.newrquote(
+          ast.specialized.top.QuoteExpr {
+            expr = node.args[i],
+            expr_type = arg_types[i],
+            annotations = node.annotations,
+            span = node.span,
+          })
+      end,
+      args)
+    local result = fn.value.fn(unpack(quotes))
+    if not (std.is_rquote(result) and ast.is_node(result:getast()) and
+              result:getast():is(ast.specialized.top.QuoteExpr))
+    then
+      report.error(node, "macro was expected to return an rexpr, but got " .. tostring(result))
+    end
+    return type_check.expr(cx, result:getast().expr)
+  end
+
   -- Determine the type of the function being called.
   local fn_type
   local def_type
@@ -1233,6 +1255,22 @@ function type_check.expr_raw_fields(cx, node)
     region = region,
     fields = privilege_fields,
     expr_type = fields_type,
+    annotations = node.annotations,
+    span = node.span,
+  }
+end
+
+function type_check.expr_raw_future(cx, node)
+  local value = type_check.expr(cx, node.value)
+  local value_type = std.as_read(value.expr_type)
+
+  if value_type ~= std.c.legion_future_t then
+    report.error(node, "type mismatch in argument 2: expected legion_future_t but got " .. tostring(value_type))
+  end
+
+  return ast.typed.expr.RawFuture {
+    value = value,
+    expr_type = node.value_type,
     annotations = node.annotations,
     span = node.span,
   }
@@ -2005,6 +2043,8 @@ function type_check.expr_image(cx, node)
 end
 
 function type_check.expr_image_by_task(cx, node)
+  local disjointness = node.disjointness or std.aliased
+  local completeness = node.completeness or std.incomplete
   local parent = type_check.expr(cx, node.parent)
   local parent_type = std.check_read(cx, parent)
   local index_type = parent_type:ispace().index_type
@@ -2060,9 +2100,11 @@ function type_check.expr_image_by_task(cx, node)
   else
     parent_symbol = std.newsymbol()
   end
-  local expr_type = std.partition(std.aliased, parent_symbol, partition_type.colors_symbol)
+  local expr_type = std.partition(disjointness, completeness, parent_symbol, partition_type.colors_symbol)
 
   return ast.typed.expr.ImageByTask {
+    disjointness = node.disjointness,
+    completeness = node.completeness,
     parent = parent,
     partition = partition,
     task = task,
@@ -3157,6 +3199,9 @@ local binary_ops = {
   ["-"] = binary_op_type("-"),
   ["<"] = binary_op_type("<"),
   [">"] = binary_op_type(">"),
+  ["^"] = binary_op_type("^"),
+  ["<<"] = binary_op_type("<<"),
+  [">>"] = binary_op_type(">>"),
   ["<="] = binary_op_type("<="),
   [">="] = binary_op_type(">="),
   ["=="] = binary_equality("=="),
@@ -3799,6 +3844,7 @@ local type_check_expr_node = {
   [ast.specialized.expr.Ctor]                       = type_check.expr_ctor,
   [ast.specialized.expr.RawContext]                 = type_check.expr_raw_context,
   [ast.specialized.expr.RawFields]                  = type_check.expr_raw_fields,
+  [ast.specialized.expr.RawFuture]                  = type_check.expr_raw_future,
   [ast.specialized.expr.RawPhysical]                = type_check.expr_raw_physical,
   [ast.specialized.expr.RawRuntime]                 = type_check.expr_raw_runtime,
   [ast.specialized.expr.RawTask]                    = type_check.expr_raw_task,
@@ -4464,7 +4510,6 @@ local opaque_types = {
   [std.c.legion_attach_launcher_t]             = true,
   [std.c.legion_must_epoch_launcher_t]         = true,
   [std.c.legion_physical_region_t]             = true,
-  [std.c.legion_index_iterator_t]              = true,
   [std.c.legion_task_t]                        = true,
   [std.c.legion_inline_t]                      = true,
   [std.c.legion_mappable_t]                    = true,

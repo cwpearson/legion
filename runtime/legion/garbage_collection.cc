@@ -121,8 +121,8 @@ namespace Legion {
         local_space(rt->address_space), 
         current_state(INACTIVE_STATE), has_gc_references(false),
         has_valid_references(false), has_resource_references(false), 
-        gc_references(0), valid_references(0), resource_references(0), 
-        registered_with_runtime(do_registration)
+        reentrant_update(false), gc_references(0), valid_references(0), 
+        resource_references(0), registered_with_runtime(do_registration)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -209,7 +209,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant);
           if (wait_for.exists())
             continue;
           // Wait for any state transitions to be finished
@@ -219,6 +220,11 @@ namespace Legion {
           assert(__sync_fetch_and_add(&gc_references, 0) > 0);
 #endif
           has_gc_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -275,7 +281,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           // Check to see if we lost the race for changing state
@@ -283,7 +290,16 @@ namespace Legion {
               (__sync_fetch_and_add(&gc_references, 0) == 0))
             has_gc_references = false;
           else
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             break;
+          }
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -334,7 +350,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
@@ -342,6 +359,11 @@ namespace Legion {
           assert(__sync_fetch_and_add(&valid_references, 0) > 0);
 #endif
           has_valid_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -398,7 +420,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           // Check to see if we lost the race for changing state
@@ -406,7 +429,16 @@ namespace Legion {
               (__sync_fetch_and_add(&valid_references, 0) == 0))
             has_valid_references = false;
           else
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             break;
+          }
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -489,7 +521,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           std::pair<AddressSpaceID,AddressSpaceID> key(source, target);
@@ -518,6 +551,11 @@ namespace Legion {
             }
             else
               create_gc_refs[key] = 1;
+          }
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
           }
           first = false;
         }
@@ -572,7 +610,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           std::pair<AddressSpaceID,AddressSpaceID> key(source, target);
@@ -601,6 +640,11 @@ namespace Legion {
             }
             else
               create_gc_refs[key] = -1;
+          }
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
           }
           first = false;
         }
@@ -655,7 +699,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           gc_references += cnt;
@@ -666,11 +711,20 @@ namespace Legion {
           else
             finder->second += cnt;
           if (gc_references > cnt)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return;
+          }
 #ifdef DEBUG_LEGION
           assert(!has_gc_references);
 #endif
           has_gc_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -728,7 +782,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           gc_references++;
@@ -739,11 +794,20 @@ namespace Legion {
           else
             finder->second += cnt;
           if (gc_references > cnt)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return;
+          }
 #ifdef DEBUG_LEGION
           assert(!has_gc_references);
 #endif
           has_gc_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -799,7 +863,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
@@ -815,8 +880,17 @@ namespace Legion {
           if (finder->second == 0)
             detailed_base_gc_references.erase(finder);
           if (gc_references > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return false;
+          }
           has_gc_references = false;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -868,7 +942,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
@@ -884,8 +959,17 @@ namespace Legion {
           if (finder->second == 0)
             detailed_nested_gc_references.erase(finder);
           if (gc_references > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return false;
+          }
           has_gc_references = false;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -937,7 +1021,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           valid_references += cnt;
@@ -948,11 +1033,20 @@ namespace Legion {
           else
             finder->second += cnt;
           if (valid_references > cnt)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return;
+          }
 #ifdef DEBUG_LEGION
           assert(!has_valid_references);
 #endif
           has_valid_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -1009,7 +1103,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
           valid_references += cnt;
@@ -1020,11 +1115,20 @@ namespace Legion {
           else
             finder->second += cnt;
           if (valid_references > cnt)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return;
+          }
 #ifdef DEBUG_LEGION
           assert(!has_valid_references);
 #endif
           has_valid_references = true;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -1081,7 +1185,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
@@ -1097,8 +1202,17 @@ namespace Legion {
           if (finder->second == 0)
             detailed_base_valid_references.erase(finder);
           if (valid_references > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return false;
+          }
           has_valid_references = false;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -1150,7 +1264,8 @@ namespace Legion {
         AutoLock gc(gc_lock);
         if (first)
         {
-          wait_for = check_for_transition_event(); 
+          bool reentrant = false;
+          wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
@@ -1166,8 +1281,17 @@ namespace Legion {
           if (finder->second == 0)
             detailed_nested_valid_references.erase(finder);
           if (valid_references > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
             return false;
+          }
           has_valid_references = false;
+          if (reentrant)
+          {
+            reentrant_update = true;
+            break;
+          }
           first = false;
         }
         done = update_state(need_activate, need_validate,
@@ -1827,12 +1951,25 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    RtEvent DistributedCollectable::check_for_transition_event(void)
+    RtEvent DistributedCollectable::check_for_transition_event(bool &reentrant)
     //--------------------------------------------------------------------------
     {
       // If we already have a transition event then return it
       if (transition_event.exists())
-        return transition_event;
+      {
+        // external tasks can't handle reentrant cases
+        if (external_implicit_task)
+          return transition_event;
+        // Check for whether we are reentrant
+        const RtEvent finish_event(Processor::get_current_finish_event());
+        if (finish_event == reentrant_event)
+        {
+          reentrant = true;
+          return RtEvent::NO_RT_EVENT;
+        }
+        else
+          return transition_event;
+      }
       // Otherwise check to see if we are in the middle of a transition
       if ((current_state == PENDING_ACTIVE_STATE) ||
           (current_state == PENDING_INACTIVE_STATE) ||
@@ -1840,7 +1977,31 @@ namespace Legion {
           (current_state == PENDING_INVALID_STATE) || 
           (current_state == PENDING_ACTIVE_VALID_STATE) ||
           (current_state == PENDING_INACTIVE_INVALID_STATE))
-        transition_event = Runtime::create_rt_user_event();
+      {
+        // external implicit tasks can't handle being reentrant
+        if (external_implicit_task)
+        {
+          transition_event = Runtime::create_rt_user_event();
+          return transition_event;
+        }
+        // Check to see if we are reentrant
+        const RtEvent finish_event(Processor::get_current_finish_event());
+        if (finish_event == reentrant_event)
+        {
+          reentrant = true;
+          return RtEvent::NO_RT_EVENT;
+        }
+        else
+          transition_event = Runtime::create_rt_user_event();
+      }
+      else if (!external_implicit_task)
+      {
+#ifdef DEBUG_LEGION
+        assert(!reentrant_event.exists());
+#endif
+        // Save the reentrant event since we're going to iterate
+        reentrant_event = RtEvent(Processor::get_current_finish_event());
+      }
       return transition_event;
     }
 
@@ -1857,6 +2018,9 @@ namespace Legion {
       {
         case INACTIVE_STATE:
           {
+#ifdef DEBUG_LEGION
+            assert(!reentrant_update);
+#endif
             // See if we have any reason to be active
 #ifdef USE_REMOTE_REFERENCES
             if (has_valid_references || (!create_valid_refs.empty()))
@@ -1881,6 +2045,9 @@ namespace Legion {
           }
         case ACTIVE_INVALID_STATE:
           {
+#ifdef DEBUG_LEGION
+            assert(!reentrant_update);
+#endif
             // See if we have a reason to be valid
 #ifdef USE_REMOTE_REFERENCES
             if (has_valid_references || !create_valid_refs.empty())
@@ -1906,6 +2073,9 @@ namespace Legion {
           }
         case VALID_STATE:
           {
+#ifdef DEBUG_LEGION
+            assert(!reentrant_update);
+#endif
             // See if we have a reason to be invalid
 #ifdef USE_REMOTE_REFERENCES
             if (!has_valid_references && create_valid_refs.empty())
@@ -1936,6 +2106,13 @@ namespace Legion {
           }
         case PENDING_ACTIVE_STATE:
           {
+            current_state = ACTIVE_INVALID_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef DEBUG_LEGION
 #ifdef USE_REMOTE_REFERENCES
             assert(!has_valid_references && create_valid_refs.empty());
@@ -1945,16 +2122,17 @@ namespace Legion {
             assert(has_gc_references);
 #endif
 #endif
-            current_state = ACTIVE_INVALID_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         case PENDING_INACTIVE_STATE:
           {
+            current_state = INACTIVE_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef DEBUG_LEGION
 #ifdef USE_REMOTE_REFERENCES
             assert(!has_valid_references && create_valid_refs.empty());
@@ -1964,16 +2142,17 @@ namespace Legion {
             assert(!has_gc_references);
 #endif
 #endif
-            current_state = INACTIVE_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         case PENDING_VALID_STATE:
           {
+            current_state = VALID_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef DEBUG_LEGION
 #ifdef USE_REMOTE_REFERENCES
             assert(has_valid_references || create_valid_refs.empty());
@@ -1981,16 +2160,17 @@ namespace Legion {
             assert(has_valid_references);
 #endif
 #endif
-            current_state = VALID_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         case PENDING_INVALID_STATE:
           {
+            current_state = ACTIVE_INVALID_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef DEBUG_LEGION
 #ifdef USE_REMOTE_REFERENCES
             assert(!has_valid_references && create_valid_refs.empty());
@@ -2000,31 +2180,33 @@ namespace Legion {
             assert(has_gc_references);
 #endif
 #endif
-            current_state = ACTIVE_INVALID_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         case PENDING_ACTIVE_VALID_STATE:
           {
+            current_state = VALID_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef USE_REMOTE_REFERENCES
             assert(has_valid_references || !create_valid_refs.empty());
 #else
             assert(has_valid_references);
 #endif
-            current_state = VALID_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         case PENDING_INACTIVE_INVALID_STATE:
           {
+            current_state = INACTIVE_STATE;
+            if (reentrant_update)
+            {
+              reentrant_update = false;
+              return update_state(need_activate, need_validate,
+                  need_invalidate, need_deactivate, do_deletion); 
+            }
 #ifdef DEBUG_LEGION
 #ifdef USE_REMOTE_REFERENCES
             assert(!has_valid_references && !create_valid_refs.empty());
@@ -2034,12 +2216,6 @@ namespace Legion {
             assert(!has_gc_references);
 #endif
 #endif
-            current_state = INACTIVE_STATE;
-            if (transition_event.exists())
-            {
-              Runtime::trigger_event(transition_event);
-              transition_event = RtUserEvent::NO_RT_USER_EVENT;
-            }
             break;
           }
         default:
@@ -2048,7 +2224,15 @@ namespace Legion {
       const bool done = !(need_activate || need_validate || 
                           need_invalidate || need_deactivate);
       if (done)
+      {
         do_deletion = can_delete();
+        reentrant_event = RtEvent::NO_RT_EVENT;
+        if (transition_event.exists())
+        {
+          Runtime::trigger_event(transition_event);
+          transition_event = RtUserEvent::NO_RT_USER_EVENT;
+        }
+      }
       else
         do_deletion = false;
       return done;

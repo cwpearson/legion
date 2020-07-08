@@ -22,5 +22,4 @@ import "regent"
 task f(x : int, y : bool)
   var z = x + y
 end
-
-f(5, true)
+f:compile()

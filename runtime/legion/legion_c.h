@@ -83,7 +83,6 @@ extern "C" {
   NEW_OPAQUE_TYPE(legion_accessor_array_##DIM##d_t);
   LEGION_FOREACH_N(NEW_ACCESSOR_ARRAY_TYPE)
 #undef NEW_ACCESSOR_ARRAY_TYPE
-  NEW_OPAQUE_TYPE(legion_index_iterator_t);
   NEW_OPAQUE_TYPE(legion_task_t);
   NEW_OPAQUE_TYPE(legion_copy_t);
   NEW_OPAQUE_TYPE(legion_fill_t);
@@ -185,7 +184,7 @@ extern "C" {
    */
   typedef struct legion_domain_point_t {
     int dim;
-    coord_t point_data[MAX_POINT_DIM];
+    coord_t point_data[LEGION_MAX_DIM];
   } legion_domain_point_t;
 
   /**
@@ -955,6 +954,16 @@ extern "C" {
   /**
    * @param handle Caller must have ownership of parameter `handle`.
    *
+   * @see Legion::Runtime::create_shared_ownership
+   */
+  void
+  legion_index_space_create_shared_ownership(legion_runtime_t runtime,
+                                             legion_context_t ctx,
+                                             legion_index_space_t handle);
+
+  /**
+   * @param handle Caller must have ownership of parameter `handle`.
+   *
    * @see Legion::Runtime::destroy_index_space()
    */
   void
@@ -1031,7 +1040,7 @@ extern "C" {
     legion_index_space_t parent,
     legion_coloring_t coloring,
     bool disjoint,
-    int part_color /* = AUTO_GENERATE_ID */);
+    legion_color_t part_color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1047,7 +1056,7 @@ extern "C" {
     legion_domain_t color_space,
     legion_domain_coloring_t coloring,
     bool disjoint,
-    int part_color /* = AUTO_GENERATE_ID */);
+    legion_color_t part_color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1063,7 +1072,7 @@ extern "C" {
     legion_domain_t color_space,
     legion_point_coloring_t coloring,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1079,7 +1088,7 @@ extern "C" {
     legion_domain_t color_space,
     legion_domain_point_coloring_t coloring,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1095,7 +1104,7 @@ extern "C" {
     legion_domain_t color_space,
     legion_multi_domain_point_coloring_t coloring,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1110,7 +1119,7 @@ extern "C" {
     legion_context_t ctx, \
     legion_index_space_t parent, \
     legion_blockify_##DIM##d_t blockify, \
-    int part_color /* = AUTO_GENERATE_ID */);
+    legion_color_t part_color /* = AUTO_GENERATE_ID */);
   LEGION_FOREACH_N(CREATE_BLOCKIFY)
 #undef CREATE_BLOCKIFY
 
@@ -1125,7 +1134,7 @@ extern "C" {
                                       legion_index_space_t parent,
                                       legion_index_space_t color_space,
                                       size_t granularity,
-                                      int color /* = AUTO_GENERATE_ID */);
+                                      legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value
@@ -1142,7 +1151,7 @@ extern "C" {
       size_t num_colors,
       legion_index_space_t color_space,
       size_t granularity /* = 1 */,
-      int color /* = AUTO_GENERATE_ID */);
+      legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value
@@ -1157,7 +1166,7 @@ extern "C" {
       legion_future_map_t future_map,
       legion_index_space_t color_space,
       size_t granularity /* = 1 */,
-      int color /* = AUTO_GENERATE_ID */);
+      legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1173,7 +1182,7 @@ extern "C" {
     legion_index_partition_t handle2,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1189,7 +1198,7 @@ extern "C" {
     legion_index_partition_t handle2,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1203,7 +1212,7 @@ extern "C" {
     legion_index_space_t parent,
     legion_index_partition_t handle,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */,
+    legion_color_t color /* = AUTO_GENERATE_ID */,
     bool dominates /* = false */);
 
   /**
@@ -1220,7 +1229,7 @@ extern "C" {
     legion_index_partition_t handle2,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value
@@ -1238,7 +1247,7 @@ extern "C" {
       legion_index_space_t color_space,
       bool perform_intersections /* = true */,
       legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-      int color /* = AUTO_GENERATE_ID */);
+      legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value
@@ -1254,7 +1263,7 @@ extern "C" {
       legion_index_space_t color_space,
       bool perform_intersections /* = true */,
       legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-      int color /* = AUTO_GENERATE_ID */);
+      legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1268,7 +1277,7 @@ extern "C" {
                                          legion_logical_region_t parent,
                                          legion_field_id_t fid,
                                          legion_index_space_t color_space,
-                                         int color /* = AUTO_GENERATE_ID */,
+                                         legion_color_t color /* = AUTO_GENERATE_ID */,
                                          legion_mapper_id_t id /* = 0 */,
                                          legion_mapping_tag_id_t tag /* = 0 */,
                                          legion_partition_kind_t part_kind /* = DISJOINT_KIND */);
@@ -1288,7 +1297,7 @@ extern "C" {
     legion_field_id_t fid,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */,
+    legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
     legion_mapping_tag_id_t tag /* = 0 */);
 
@@ -1307,7 +1316,7 @@ extern "C" {
     legion_field_id_t fid,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */,
+    legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
     legion_mapping_tag_id_t tag /* = 0 */);
 
@@ -1326,7 +1335,7 @@ extern "C" {
     legion_field_id_t fid,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */,
+    legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
     legion_mapping_tag_id_t tag /* = 0 */);
 
@@ -1345,7 +1354,7 @@ extern "C" {
     legion_field_id_t fid,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */,
+    legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
     legion_mapping_tag_id_t tag /* = 0 */);
 
@@ -1363,7 +1372,7 @@ extern "C" {
     legion_domain_transform_t transform,
     legion_domain_t extent,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1377,7 +1386,7 @@ extern "C" {
     legion_index_space_t parent,
     legion_index_space_t color_space,
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
-    int color /* = AUTO_GENERATE_ID */);
+    legion_color_t color /* = AUTO_GENERATE_ID */);
 
   /**
    * @see Legion::Runtime::create_index_space_union()
@@ -1508,11 +1517,21 @@ extern "C" {
   /**
    * @param handle Caller must have ownership of parameter `handle`.
    *
+   * @see Legion::Runtime::create_shared_ownership
+   */
+  void
+  legion_index_partition_create_shared_ownership(legion_runtime_t runtime,
+                                                 legion_context_t ctx,
+                                                 legion_index_partition_t handle);
+
+  /**
+   * @param handle Caller must have ownership of parameter `handle`.
+   *
    * @see Legion::Runtime::destroy_index_space()
    */
   void
   legion_index_partition_destroy(legion_runtime_t runtime,
-                                legion_context_t ctx,
+                                 legion_context_t ctx,
                                  legion_index_partition_t handle);
 
   /**
@@ -1569,6 +1588,42 @@ extern "C" {
   legion_field_space_t
   legion_field_space_create(legion_runtime_t runtime,
                             legion_context_t ctx);
+
+  /**
+   * @return Caller takes ownership of return value
+   *
+   * @see Legion::Runtime::create_field_space()
+   */
+  legion_field_space_t
+  legion_field_space_create_with_fields(legion_runtime_t runtime,
+                                        legion_context_t ctx,
+                                        size_t *field_sizes,
+                                        legion_field_id_t *field_ids,
+                                        size_t num_fields, 
+                                        legion_custom_serdez_id_t serdez);
+
+  /**
+   * @return Caller takes ownership of return value
+   *
+   * @see Legion::Runtime::create_field_space()
+   */
+  legion_field_space_t
+  legion_field_space_create_with_futures(legion_runtime_t runtime,
+                                         legion_context_t ctx,
+                                         legion_future_t *field_sizes,
+                                         legion_field_id_t *field_ids,
+                                         size_t num_fields, 
+                                         legion_custom_serdez_id_t serdez);
+
+  /**
+   * @param handle Caller must have ownership of parameter `handle`.
+   *
+   * @see Legion::Runtime::create_shared_ownership
+   */
+  void
+  legion_field_space_create_shared_ownership(legion_runtime_t runtime,
+                                             legion_context_t ctx,
+                                             legion_field_space_t handle);
 
   /**
    * @param handle Caller must have ownership of parameter `handle`.
@@ -1714,6 +1769,16 @@ extern "C" {
                                legion_index_space_t index,
                                legion_field_space_t fields,
                                bool task_local);
+
+  /**
+   * @param handle Caller must have ownership of parameter `handle`.
+   *
+   * @see Legion::Runtime::create_shared_ownership
+   */
+  void
+  legion_logical_region_create_shared_ownership(legion_runtime_t runtime,
+                                                legion_context_t ctx,
+                                                legion_logical_region_t handle);
 
   /**
    * @param handle Caller must have ownership of parameter `handle`.
@@ -2117,12 +2182,27 @@ extern "C" {
   legion_field_allocator_destroy(legion_field_allocator_t handle);
 
   /**
+   * This will give the value of the macro AUTO_GENERATE_ID
+   */
+  legion_field_id_t
+  legion_auto_generate_id(void);
+
+  /**
    * @see Legion::FieldAllocator::allocate_field()
    */
   legion_field_id_t
   legion_field_allocator_allocate_field(
     legion_field_allocator_t allocator,
     size_t field_size,
+    legion_field_id_t desired_fieldid /* = AUTO_GENERATE_ID */);
+
+  /**
+   * @see Legion::FieldAllocator::allocate_field()
+   */
+  legion_field_id_t
+  legion_field_allocator_allocate_field_future(
+    legion_field_allocator_t allocator,
+    legion_future_t field_size,
     legion_field_id_t desired_fieldid /* = AUTO_GENERATE_ID */);
 
   /**
@@ -2752,6 +2832,13 @@ extern "C" {
   void
   legion_task_launcher_set_enable_inlining(legion_task_launcher_t launcher,
                                            bool enable_inlining);
+
+  /**
+   * @see Legion::TaskLauncher::local_task_function
+   */
+  void
+  legion_task_launcher_set_local_function_task(legion_task_launcher_t launcher,
+                                               bool local_function_task);
 
   /**
    * @return Caller takes ownership of return value.
@@ -3784,14 +3871,23 @@ extern "C" {
     legion_external_resource_t resource);
 
   /**
-   * @see Legion::AttachLauncher::AttachLauncher()
+   * @see Legion::AttachLauncher::attach_hdf5()
+   */
+  void
+  legion_attach_launcher_attach_hdf5(legion_attach_launcher_t handle,
+                                     const char *filename,
+                                     legion_field_map_t field_map,
+                                     legion_file_mode_t mode);
+
+  /**
+   * @see Legion::AttachLauncher::restricted
    */
   void
   legion_attach_launcher_set_restricted(legion_attach_launcher_t handle,
                                         bool restricted);
 
   /**
-   * @see Legion::AttachLauncher::AttachLauncher()
+   * @see Legion::AttachLauncher::mapped
    */
   void
   legion_attach_launcher_set_mapped(legion_attach_launcher_t handle,
@@ -4173,44 +4269,6 @@ extern "C" {
   legion_accessor_array_##DIM##d_destroy(legion_accessor_array_##DIM##d_t handle);
   LEGION_FOREACH_N(DESTROY_ARRAY)
 #undef DESTROY_ARRAY
-
-  /**
-   * @return Caller takes ownership of return value.
-   *
-   * @see Legion::IndexIterator::IndexIterator()
-   */
-  legion_index_iterator_t
-  legion_index_iterator_create(legion_runtime_t runtime,
-                               legion_context_t context,
-                               legion_index_space_t handle);
-
-  /**
-   * @param handle Caller must have ownership of parameter `handle`.
-   *
-   * @see Legion::IndexIterator::~IndexIterator()
-   */
-  void
-  legion_index_iterator_destroy(legion_index_iterator_t handle);
-
-  /**
-   * @see Legion::IndexIterator::has_next()
-   */
-  bool
-  legion_index_iterator_has_next(legion_index_iterator_t handle);
-
-  /**
-   * @see Legion::IndexIterator::next()
-   */
-  legion_ptr_t
-  legion_index_iterator_next(legion_index_iterator_t handle);
-
-  /**
-   * @see Legion::IndexIterator::next_span()
-   */
-  legion_ptr_t
-  legion_index_iterator_next_span(legion_index_iterator_t handle,
-                                  size_t *act_count,
-                                  size_t req_count /* = -1 */);
 
   // -----------------------------------------------------------------------
   // Mappable Operations
@@ -4701,8 +4759,14 @@ extern "C" {
   /**
    * @see Legion::Runtime::wait_for_shutdown()
    */
-  void
+  int 
   legion_runtime_wait_for_shutdown(void);
+
+  /**
+   * @see Legion::Runtime::set_return_code()
+   */
+  void
+  legion_runtime_set_return_code(int return_code);
 
   /**
    * @see Legion::Runtime::set_top_level_task_id()
@@ -5553,6 +5617,18 @@ extern "C" {
       legion_mapper_context_t ctx,
       legion_physical_instance_t *instances,
       size_t instances_size);
+
+  // A hidden method here that hopefully nobody sees or ever needs
+  // to use but its here anyway just in case
+  legion_shard_id_t
+  legion_context_get_shard_id(legion_runtime_t /*runtime*/,
+                              legion_context_t /*context*/,
+                              bool /*I know what I am doing*/);
+  // Another hidden method for getting the number of shards
+  size_t
+  legion_context_get_num_shards(legion_runtime_t /*runtime*/,
+                                legion_context_t /*context*/,
+                                bool /*I know what I am doing*/);
       
   /**
    * used by fortran API

@@ -1771,6 +1771,7 @@ namespace Realm {
       unsigned cword = (((output_count * element_size) << 8) +
 			(input_done ? 128 : 0) + // bit 7
 			(output_space_id + 1));
+      assert(cword != 0);
 
       XferPort &cp = output_ports[spaces.size()];
       if(cp.seq_remote.span_exists(cp.local_bytes_total,
@@ -2814,6 +2815,10 @@ namespace Realm {
       if(dsts[i].inst != dsts[idx].inst) continue;
       if(dsts[i].serdez_id != dsts[idx].serdez_id) continue;
       if(dsts[i].indirect_index != dsts[idx].indirect_index) continue;
+      // only merge fields of the same size to avoid issues with wrapping
+      //  around in intermediate buffers
+      if(srcs[i].size != srcs[idx].size) continue;
+      if(dsts[i].size != dsts[idx].size) continue;
       fields_to_merge.insert(i);
     }
   }

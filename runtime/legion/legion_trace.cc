@@ -63,9 +63,9 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
-    LegionTrace::LegionTrace(InnerContext *c, bool logical_only)
-      : ctx(c), state(LOGICAL_ONLY), last_memoized(0),
-        blocking_call_observed(false)
+    LegionTrace::LegionTrace(InnerContext *c, TraceID t, bool logical_only)
+      : ctx(c), tid(t), state(LOGICAL_ONLY), last_memoized(0),
+        blocking_call_observed(false), fixed(false)
     //--------------------------------------------------------------------------
     {
       physical_trace = logical_only ? NULL
@@ -79,6 +79,16 @@ namespace Legion {
     {
       if (physical_trace != NULL)
         delete physical_trace;
+    }
+
+    //--------------------------------------------------------------------------
+    void LegionTrace::fix_trace(void)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(!fixed);
+#endif
+      fixed = true;
     }
 
     //--------------------------------------------------------------------------
@@ -200,9 +210,9 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
-    StaticTrace::StaticTrace(InnerContext *c,
+    StaticTrace::StaticTrace(TraceID t, InnerContext *c, bool logical_only,
                              const std::set<RegionTreeID> *trees)
-      : LegionTrace(c, true)
+      : LegionTrace(c, t, logical_only)
     //--------------------------------------------------------------------------
     {
       if (trees != NULL)
@@ -211,7 +221,7 @@ namespace Legion {
     
     //--------------------------------------------------------------------------
     StaticTrace::StaticTrace(const StaticTrace &rhs)
-      : LegionTrace(NULL, true)
+      : LegionTrace(NULL, 0, true)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -239,14 +249,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    bool StaticTrace::is_fixed(void) const
-    //--------------------------------------------------------------------------
-    {
-      // Static traces are always fixed
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
     bool StaticTrace::handles_region_tree(RegionTreeID tid) const
     //--------------------------------------------------------------------------
     {
@@ -256,18 +258,23 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void StaticTrace::record_static_dependences(Operation *op,
-                               const std::vector<StaticDependence> *dependences)
+    bool StaticTrace::initialize_op_tracing(Operation *op,
+                               const std::vector<StaticDependence> *dependences,
+                               const LogicalTraceInfo *trace_info)
     //--------------------------------------------------------------------------
     {
+      // If we've already recorded all these, there's no need to do it again
+      if (fixed)
+        return false;
       // Internal operations get to skip this
       if (op->is_internal_op())
-        return;
+        return false;
       // All other operations have to add something to the list
       if (dependences == NULL)
         static_dependences.resize(static_dependences.size() + 1);
       else // Add it to the list of static dependences
         static_dependences.push_back(*dependences);
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -441,6 +448,23 @@ namespace Legion {
       assert(false);
     }
 
+    //--------------------------------------------------------------------------
+    void StaticTrace::end_trace_capture(void)
+    //--------------------------------------------------------------------------
+    {
+      // Remove mapping fences on the frontiers which haven't been removed yet
+      for (std::set<std::pair<Operation*,GenerationID> >::const_iterator it =
+            frontiers.begin(); it != frontiers.end(); it++)
+        it->first->remove_mapping_reference(it->second);
+      operations.clear();
+      frontiers.clear();
+      last_memoized = 0;
+#ifdef LEGION_SPY
+      current_uids.clear();
+      num_regions.clear();
+#endif
+    }
+
 #ifdef LEGION_SPY
     //--------------------------------------------------------------------------
     void StaticTrace::perform_logging(
@@ -496,14 +520,14 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     DynamicTrace::DynamicTrace(TraceID t, InnerContext *c, bool logical_only)
-      : LegionTrace(c, logical_only), tid(t), fixed(false), tracing(true)
+      : LegionTrace(c, t, logical_only), tracing(true)
     //--------------------------------------------------------------------------
     {
     }
 
     //--------------------------------------------------------------------------
     DynamicTrace::DynamicTrace(const DynamicTrace &rhs)
-      : LegionTrace(NULL, true), tid(0)
+      : LegionTrace(NULL, 0, true)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -523,17 +547,7 @@ namespace Legion {
       // should never be called
       assert(false);
       return *this;
-    }
-
-    //--------------------------------------------------------------------------
-    void DynamicTrace::fix_trace(void)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(!fixed);
-#endif
-      fixed = true;
-    }
+    } 
 
     //--------------------------------------------------------------------------
     void DynamicTrace::end_trace_capture(void)
@@ -542,6 +556,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(tracing);
 #endif
+      // We don't record mapping dependences when tracing so we don't need
+      // to remove them when we are here
       operations.clear();
       last_memoized = 0;
       op_map.clear();
@@ -562,11 +578,15 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void DynamicTrace::record_static_dependences(Operation *op,
-                               const std::vector<StaticDependence> *dependences)
+    bool DynamicTrace::initialize_op_tracing(Operation *op,
+                               const std::vector<StaticDependence> *dependences,
+                               const LogicalTraceInfo *trace_info)
     //--------------------------------------------------------------------------
     {
-      // Nothing to do
+      if (trace_info != NULL) // happens for internal operations
+        return !trace_info->already_traced;
+      else
+        return !is_fixed();
     }
 
     //--------------------------------------------------------------------------
@@ -1119,21 +1139,21 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TraceCaptureOp::initialize_capture(InnerContext *ctx, bool has_block)
+    void TraceCaptureOp::initialize_capture(InnerContext *ctx, bool has_block,
+                                            bool remove_trace_ref)
     //--------------------------------------------------------------------------
     {
       initialize(ctx, EXECUTION_FENCE, false/*need future*/);
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
-      assert(trace->is_dynamic_trace());
 #endif
-      dynamic_trace = trace->as_dynamic_trace();
-      local_trace = dynamic_trace;
+      local_trace = trace;
       // Now mark our trace as NULL to avoid registering this operation
       trace = NULL;
       tracing = false;
       current_template = NULL;
       has_blocking_call = has_block;
+      remove_trace_reference = remove_trace_ref;
     }
 
     //--------------------------------------------------------------------------
@@ -1172,10 +1192,9 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(trace == NULL);
       assert(local_trace != NULL);
-      assert(local_trace == dynamic_trace);
 #endif
       // Indicate that we are done capturing this trace
-      dynamic_trace->end_trace_capture();
+      local_trace->end_trace_capture();
       // Register this fence with all previous users in the parent's context
       FenceOp::trigger_dependence_analysis();
       parent_ctx->record_previous_trace(local_trace);
@@ -1211,6 +1230,8 @@ namespace Legion {
               execution_precondition, ApEvent(pending_deletion));
         local_trace->initialize_tracing_state();
       }
+      if (remove_trace_reference && local_trace->remove_reference())
+        delete local_trace;
       FenceOp::trigger_mapping();
     }
 
@@ -1260,6 +1281,7 @@ namespace Legion {
       local_trace = trace;
       // Now mark our trace as NULL to avoid registering this operation
       trace = NULL;
+      tracing = false;
       current_template = NULL;
       template_completion = ApEvent::NO_AP_EVENT;
       replayed = false;
@@ -1321,7 +1343,7 @@ namespace Legion {
 #endif
         to_replay->execute_all();
         template_completion = to_replay->get_completion();
-        Runtime::trigger_event(completion_event, template_completion);
+        Runtime::trigger_event(NULL, completion_event, template_completion);
         parent_ctx->update_current_fence(this, true, true);
         physical_trace->record_previous_template_completion(
             template_completion);
@@ -1340,14 +1362,6 @@ namespace Legion {
         current_template = physical_trace->get_current_template();
         physical_trace->clear_cached_template();
 
-      }
-
-      // If this is a static trace, then we remove our reference when we're done
-      if (local_trace->is_static_trace())
-      {
-        StaticTrace *static_trace = static_cast<StaticTrace*>(local_trace);
-        if (static_trace->remove_reference())
-          delete static_trace;
       }
       FenceOp::trigger_dependence_analysis();
     }
@@ -1592,6 +1606,7 @@ namespace Legion {
 #endif
       local_trace = trace;
       trace = NULL;
+      tracing = false;
     }
 
     //--------------------------------------------------------------------------
@@ -1895,6 +1910,17 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
+    std::string TraceViewSet::FailedPrecondition::to_string(void) const
+    //--------------------------------------------------------------------------
+    {
+      char *m = mask.to_string();
+      std::stringstream ss;
+      ss << "view: " << view << ", Index expr: " << eq->set_expr->expr_id
+         << ", Field Mask: " << m;
+      return ss.str();
+    }
+
+    //--------------------------------------------------------------------------
     TraceViewSet::TraceViewSet(RegionTreeForest *f)
       : forest(f), view_references(f->runtime->dump_physical_traces)
     //--------------------------------------------------------------------------
@@ -2012,7 +2038,8 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    bool TraceViewSet::subsumed_by(const TraceViewSet &set) const
+    bool TraceViewSet::subsumed_by(const TraceViewSet &set,
+                                   FailedPrecondition *condition) const
     //--------------------------------------------------------------------------
     {
       for (ViewSet::const_iterator it = conditions.begin();
@@ -2022,7 +2049,15 @@ namespace Legion {
       {
         FieldMask mask = eit->second;
         if (!set.dominates(it->first, eit->first, mask))
+        {
+          if (condition != NULL)
+          {
+            condition->view = it->first;
+            condition->eq = eit->first;
+            condition->mask = mask;
+          }
           return false;
+        }
       }
 
       return true;
@@ -2064,8 +2099,8 @@ namespace Legion {
           LogicalRegion lr =
             forest->get_tree(view->get_manager()->tree_id)->handle;
           const void *name = NULL; size_t name_size = 0;
-          forest->runtime->retrieve_semantic_information(lr, NAME_SEMANTIC_TAG,
-              name, name_size, true, true);
+          forest->runtime->retrieve_semantic_information(lr, 
+              LEGION_NAME_SEMANTIC_TAG, name, name_size, true, true);
           log_tracing.info() << "  "
                     <<(view->is_reduction_view() ? "Reduction" : "Materialized")
                     << " view: " << view << ", Inst: " << std::hex
@@ -2268,12 +2303,14 @@ namespace Legion {
             {
               const InstanceRef &ref = (*pit)[idx];
               if (!ref.is_virtual_ref())
-                ref.remove_valid_reference(MAPPING_ACQUIRE_REF);
+                ref.remove_valid_reference(MAPPING_ACQUIRE_REF,NULL/*mutator*/);
             }
             pit->clear();
           }
         }
         cached_mappings.clear();
+        if (!remote_memos.empty())
+          release_remote_memos();
       }
     }
 
@@ -2301,7 +2338,7 @@ namespace Legion {
       for (std::map<unsigned, unsigned>::iterator it = crossing_events.begin();
            it != crossing_events.end(); ++it)
       {
-        ApUserEvent ev = Runtime::create_ap_user_event();
+        ApUserEvent ev = Runtime::create_ap_user_event(NULL);
         events[it->second] = ev;
         user_events[it->second] = ev;
       }
@@ -2386,14 +2423,32 @@ namespace Legion {
       if (!pre_reductions.empty())
         return Replayable(false, "external reduction views");
 
-      if (!post_reductions.subsumed_by(consumed_reductions))
-        return Replayable(false, "escaping reduction views");
+      TraceViewSet::FailedPrecondition condition;
+      if (!post_reductions.subsumed_by(consumed_reductions, &condition))
+      {
+        if (trace->runtime->dump_physical_traces)
+        {
+          return Replayable(
+              false, "escaping reduction view: " + condition.to_string());
+        }
+        else
+          return Replayable(false, "escaping reduction views");
+      }
 
       if (pre.has_refinements() || post.has_refinements())
         return Replayable(false, "found refined equivalence sets");
 
-      if (!pre.subsumed_by(post))
-        return Replayable(false, "precondition not subsumed by postcondition");
+      if (!pre.subsumed_by(post, &condition))
+      {
+        if (trace->runtime->dump_physical_traces)
+        {
+          return Replayable(
+              false, "precondition not subsumed: " + condition.to_string());
+        }
+        else
+          return Replayable(
+              false, "precondition not subsumed by postcondition");
+      }
 
       return Replayable(true);
     }
@@ -2430,7 +2485,7 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(slice_idx < slices.size());
 #endif
-      ApUserEvent fence = Runtime::create_ap_user_event();
+      ApUserEvent fence = Runtime::create_ap_user_event(NULL);
       const std::vector<TraceLocalID> &tasks = slice_tasks[slice_idx];
       for (unsigned idx = 0; idx < tasks.size(); ++idx)
         operations[tasks[idx]]
@@ -2439,7 +2494,7 @@ namespace Legion {
       for (std::vector<Instruction*>::const_iterator it = instructions.begin();
            it != instructions.end(); ++it)
         (*it)->execute();
-      Runtime::trigger_event(fence);
+      Runtime::trigger_event(NULL, fence);
     }
 
     //--------------------------------------------------------------------------
@@ -2472,6 +2527,8 @@ namespace Legion {
           optimize();
           dump_template();
         }
+        if (!remote_memos.empty())
+          release_remote_memos();
         return;
       }
       generate_conditions();
@@ -2481,6 +2538,8 @@ namespace Legion {
       events.clear();
       events.resize(num_events);
       event_map.clear();
+      if (!remote_memos.empty())
+        release_remote_memos();
     }
 
     //--------------------------------------------------------------------------
@@ -2513,6 +2572,7 @@ namespace Legion {
         propagate_merges(gen);
         transitive_reduction();
         propagate_copies(gen);
+        eliminate_dead_code(gen);
       }
       prepare_parallel_replay(gen);
       push_complete_replays();
@@ -2732,14 +2792,18 @@ namespace Legion {
         }
       }
 
-      std::vector<unsigned> inv_gen;
-      inv_gen.resize(instructions.size());
+      std::vector<unsigned> inv_gen(instructions.size(), -1U);
       for (unsigned idx = 0; idx < gen.size(); ++idx)
-        inv_gen[gen[idx]] = idx;
+      {
+        unsigned g = gen[idx];
+#ifdef DEBUG_LEGION
+        assert(inv_gen[g] == -1U || g == fence_completion_id);
+#endif
+        if (g != -1U && g < instructions.size() && inv_gen[g] == -1U)
+          inv_gen[g] = idx;
+      }
       std::vector<Instruction*> to_delete;
-      std::vector<unsigned> new_gen;
-      new_gen.resize(gen.size());
-      new_gen[fence_completion_id] = 0;
+      std::vector<unsigned> new_gen(gen.size(), -1U);
       for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
           it != frontiers.end(); ++it)
         new_gen[it->second] = 0;
@@ -2756,7 +2820,12 @@ namespace Legion {
                 merge->rhs.erase(fence_completion_id);
             }
           }
-          new_gen[inv_gen[idx]] = new_instructions.size();
+          unsigned e = inv_gen[idx];
+#ifdef DEBUG_LEGION
+          assert(e == -1U || (e < new_gen.size() && new_gen[e] == -1U));
+#endif
+          if (e != -1U)
+            new_gen[e] = new_instructions.size();
           new_instructions.push_back(inst);
         }
         else
@@ -2852,6 +2921,9 @@ namespace Legion {
               new_rhs.insert(rh);
             else
             {
+#ifdef DEBUG_LEGION
+              assert(gen[rh] != -1U);
+#endif
               unsigned generator_slice = slice_indices_by_inst[gen[rh]];
 #ifdef DEBUG_LEGION
               assert(generator_slice != -1U);
@@ -2867,7 +2939,6 @@ namespace Legion {
                 {
                   unsigned new_crossing_event = events.size();
                   events.resize(events.size() + 1);
-                  user_events.resize(events.size());
                   crossing_events[rh] = new_crossing_event;
                   new_rhs.insert(new_crossing_event);
                   slices[generator_slice].push_back(
@@ -2921,7 +2992,11 @@ namespace Legion {
           if (event_to_check != NULL)
           {
             unsigned ev = *event_to_check;
-            unsigned generator_slice = slice_indices_by_inst[gen[ev]];
+            unsigned g = gen[ev];
+#ifdef DEBUG_LEGION
+            assert(g != -1U && g < instructions.size());
+#endif
+            unsigned generator_slice = slice_indices_by_inst[g];
 #ifdef DEBUG_LEGION
             assert(generator_slice != -1U);
 #endif
@@ -2935,12 +3010,11 @@ namespace Legion {
               {
                 unsigned new_crossing_event = events.size();
                 events.resize(events.size() + 1);
-                user_events.resize(events.size());
                 crossing_events[ev] = new_crossing_event;
                 *event_to_check = new_crossing_event;
                 slices[generator_slice].push_back(
                     new TriggerEvent(*this, new_crossing_event, ev,
-                      instructions[gen[ev]]->owner));
+                      instructions[g]->owner));
               }
             }
           }
@@ -2959,10 +3033,8 @@ namespace Legion {
       std::vector<unsigned> topo_order;
       topo_order.reserve(instructions.size());
       std::vector<unsigned> inv_topo_order(events.size(), -1U);
-      std::vector<std::vector<unsigned> > incoming;
-      std::vector<std::vector<unsigned> > outgoing;
-      incoming.resize(events.size());
-      outgoing.resize(events.size());
+      std::vector<std::vector<unsigned> > incoming(events.size());
+      std::vector<std::vector<unsigned> > outgoing(events.size());
 
       for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
            it != frontiers.end(); ++it)
@@ -3063,8 +3135,7 @@ namespace Legion {
       }
 
       // Second, do a toposort on nodes via BFS
-      std::vector<unsigned> remaining_edges;
-      remaining_edges.resize(incoming.size());
+      std::vector<unsigned> remaining_edges(incoming.size());
       for (unsigned idx = 0; idx < incoming.size(); ++idx)
         remaining_edges[idx] = incoming[idx].size();
 
@@ -3122,10 +3193,8 @@ namespace Legion {
       }
 
       // Fourth, find the frontiers of chains that are connected to each node
-      std::vector<std::vector<int> > all_chain_frontiers;
-      std::vector<std::vector<unsigned> > incoming_reduced;
-      all_chain_frontiers.resize(topo_order.size());
-      incoming_reduced.resize(topo_order.size());
+      std::vector<std::vector<int> > all_chain_frontiers(topo_order.size());
+      std::vector<std::vector<unsigned> > incoming_reduced(topo_order.size());
       for (unsigned idx = 0; idx < topo_order.size(); ++idx)
       {
         std::vector<int> chain_frontiers(num_chains, -1);
@@ -3217,6 +3286,11 @@ namespace Legion {
 
       instructions.swap(new_instructions);
 
+      std::vector<unsigned> new_gen(gen.size(), -1U);
+      for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
+          it != frontiers.end(); ++it)
+        new_gen[it->second] = 0;
+
       for (unsigned idx = 0; idx < instructions.size(); ++idx)
       {
         Instruction *inst = instructions[idx];
@@ -3304,8 +3378,139 @@ namespace Legion {
             }
         }
         if (lhs != -1)
-          gen[lhs] = idx;
+          new_gen[lhs] = idx;
       }
+      gen.swap(new_gen);
+    }
+
+    //--------------------------------------------------------------------------
+    void PhysicalTemplate::eliminate_dead_code(std::vector<unsigned> &gen)
+    //--------------------------------------------------------------------------
+    {
+      std::vector<bool> used(instructions.size(), false);
+      for (unsigned idx = 0; idx < instructions.size(); ++idx)
+      {
+        Instruction *inst = instructions[idx];
+        InstructionKind kind = inst->get_kind();
+        // We only eliminate two kinds of instructions:
+        // GetTermEvent and SetOpSyncEvent
+        used[idx] = kind != SET_OP_SYNC_EVENT;
+        switch (kind)
+        {
+          case MERGE_EVENT:
+            {
+              MergeEvent *merge = inst->as_merge_event();
+              for (std::set<unsigned>::iterator it = merge->rhs.begin();
+                   it != merge->rhs.end(); ++it)
+              {
+#ifdef DEBUG_LEGION
+                assert(gen[*it] != -1U);
+#endif
+                used[gen[*it]] = true;
+              }
+              break;
+            }
+          case TRIGGER_EVENT:
+            {
+              TriggerEvent *trigger = inst->as_trigger_event();
+#ifdef DEBUG_LEGION
+              assert(gen[trigger->rhs] != -1U);
+#endif
+              used[gen[trigger->rhs]] = true;
+              break;
+            }
+          case ISSUE_COPY:
+            {
+              IssueCopy *copy = inst->as_issue_copy();
+#ifdef DEBUG_LEGION
+              assert(gen[copy->precondition_idx] != -1U);
+#endif
+              used[gen[copy->precondition_idx]] = true;
+              break;
+            }
+          case ISSUE_FILL:
+            {
+              IssueFill *fill = inst->as_issue_fill();
+#ifdef DEBUG_LEGION
+              assert(gen[fill->precondition_idx] != -1U);
+#endif
+              used[gen[fill->precondition_idx]] = true;
+              break;
+            }
+          case SET_EFFECTS:
+            {
+              SetEffects *effects = inst->as_set_effects();
+#ifdef DEBUG_LEGION
+              assert(gen[effects->rhs] != -1U);
+#endif
+              used[gen[effects->rhs]] = true;
+              break;
+            }
+          case COMPLETE_REPLAY:
+            {
+              CompleteReplay *complete = inst->as_complete_replay();
+#ifdef DEBUG_LEGION
+              assert(gen[complete->rhs] != -1U);
+#endif
+              used[gen[complete->rhs]] = true;
+              break;
+            }
+          case GET_TERM_EVENT:
+          case CREATE_AP_USER_EVENT:
+          case SET_OP_SYNC_EVENT:
+          case ASSIGN_FENCE_COMPLETION:
+            {
+              break;
+            }
+          default:
+            {
+              // unreachable
+              assert(false);
+            }
+        }
+      }
+      for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
+          it != frontiers.end(); ++it)
+      {
+        unsigned g = gen[it->first];
+        if (g != -1U && g < instructions.size())
+          used[g] = true;
+      }
+
+      std::vector<unsigned> inv_gen(instructions.size(), -1U);
+      for (unsigned idx = 0; idx < gen.size(); ++idx)
+      {
+        unsigned g = gen[idx];
+        if (g != -1U && g < instructions.size() && inv_gen[g] == -1U)
+          inv_gen[g] = idx;
+      }
+
+      std::vector<Instruction*> new_instructions;
+      std::vector<Instruction*> to_delete;
+      std::vector<unsigned> new_gen(gen.size(), -1U);
+      for (std::map<unsigned, unsigned>::iterator it = frontiers.begin();
+          it != frontiers.end(); ++it)
+        new_gen[it->second] = 0;
+      for (unsigned idx = 0; idx < instructions.size(); ++idx)
+      {
+        if (used[idx])
+        {
+          unsigned e = inv_gen[idx];
+#ifdef DEBUG_LEGION
+          assert(e == -1U || (e < new_gen.size() && new_gen[e] == -1U));
+#endif
+          if (e != -1U)
+            new_gen[e] = new_instructions.size();
+          new_instructions.push_back(instructions[idx]);
+        }
+        else
+          to_delete.push_back(instructions[idx]);
+      }
+
+      instructions.swap(new_instructions);
+      gen.swap(new_gen);
+      for (unsigned idx = 0; idx < to_delete.size(); ++idx)
+        delete to_delete[idx];
     }
 
     //--------------------------------------------------------------------------
@@ -3395,7 +3600,8 @@ namespace Legion {
     //--------------------------------------------------------------------------
     void PhysicalTemplate::record_mapper_output(Memoizable *memo,
                                             const Mapper::MapTaskOutput &output,
-                              const std::deque<InstanceSet> &physical_instances)
+                              const std::deque<InstanceSet> &physical_instances,
+                                              std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
     {
       const TraceLocalID op_key = memo->get_trace_local_id();
@@ -3412,6 +3618,7 @@ namespace Legion {
       mapping.task_priority = output.task_priority;
       mapping.postmap_task = output.postmap_task;
       mapping.physical_instances = physical_instances;
+      WrapperReferenceMutator mutator(applied_events);
       for (std::deque<InstanceSet>::iterator it =
            mapping.physical_instances.begin(); it !=
            mapping.physical_instances.end(); ++it)
@@ -3422,7 +3629,7 @@ namespace Legion {
           if (ref.is_virtual_ref())
             has_virtual_mapping = true;
           else
-            ref.add_valid_reference(MAPPING_ACQUIRE_REF);
+            ref.add_valid_reference(MAPPING_ACQUIRE_REF, &mutator);
         }
       }
     }
@@ -3484,16 +3691,18 @@ namespace Legion {
       assert(is_recording());
 #endif
 
-      unsigned lhs_ = convert_event(lhs);
-      user_events.resize(events.size());
-      user_events.push_back(lhs);
-
-      insert_instruction(new CreateApUserEvent(*this, lhs_,
-            find_trace_local_id(memo)));
+      unsigned lhs_ = find_or_convert_event(lhs);
+      user_events[lhs_] = lhs;
+#ifdef DEBUG_LEGION
+      assert(instructions[lhs_] == NULL);
+#endif
+      instructions[lhs_] =
+        new CreateApUserEvent(*this, lhs_, find_trace_local_id(memo));
     }
 
     //--------------------------------------------------------------------------
-    void PhysicalTemplate::record_trigger_event(ApUserEvent lhs, ApEvent rhs)
+    void PhysicalTemplate::record_trigger_event(ApUserEvent lhs, ApEvent rhs,
+                                                Memoizable *memo)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3505,10 +3714,10 @@ namespace Legion {
       assert(is_recording());
 #endif
 
+      unsigned lhs_ = find_or_convert_event(lhs);
       events.push_back(ApEvent());
-      unsigned lhs_ = find_event(lhs);
       insert_instruction(new TriggerEvent(*this, lhs_, find_event(rhs),
-            instructions[lhs_]->owner));
+            find_trace_local_id(memo)));
     }
 
     //--------------------------------------------------------------------------
@@ -3644,11 +3853,11 @@ namespace Legion {
 #endif
             find_event(precondition), redop, reduction_fold));
 
-      record_views(lhs_, expr, RegionUsage(READ_ONLY, EXCLUSIVE, 0), 
-                   tracing_srcs, src_eqs);
+      record_views(lhs_, expr, RegionUsage(LEGION_READ_ONLY, 
+            LEGION_EXCLUSIVE, 0), tracing_srcs, src_eqs);
       record_copy_views(lhs_, expr, tracing_srcs);
-      record_views(lhs_, expr, RegionUsage(WRITE_ONLY, EXCLUSIVE, 0), 
-                   tracing_dsts, dst_eqs);
+      record_views(lhs_, expr, RegionUsage(LEGION_WRITE_ONLY, 
+            LEGION_EXCLUSIVE, 0), tracing_dsts, dst_eqs);
       record_copy_views(lhs_, expr, tracing_dsts);
     }
 
@@ -3716,8 +3925,8 @@ namespace Legion {
                                        find_event(precondition)));
 
       record_fill_views(tracing_srcs);
-      record_views(lhs_, expr, RegionUsage(WRITE_ONLY, EXCLUSIVE, 0), 
-                   tracing_dsts, eqs);
+      record_views(lhs_, expr, RegionUsage(LEGION_WRITE_ONLY, 
+            LEGION_EXCLUSIVE, 0), tracing_dsts, eqs);
       record_copy_views(lhs_, expr, tracing_dsts);
     }
 
@@ -3767,7 +3976,7 @@ namespace Legion {
       views.insert(view, user_mask);
       record_copy_views(lhs_, expr, views);
 
-      const RegionUsage usage(WRITE_ONLY, EXCLUSIVE, 0);
+      const RegionUsage usage(LEGION_WRITE_ONLY, LEGION_EXCLUSIVE, 0);
       add_view_user(view, usage, lhs_, expr, user_mask);
     }
 
@@ -3956,7 +4165,7 @@ namespace Legion {
 
         DependenceType dep =
           check_dependence_type(it->first->usage, user->usage);
-        if (dep == NO_DEPENDENCE)
+        if (dep == LEGION_NO_DEPENDENCE)
           continue;
 
         to_delete.insert(it->first, overlap);
@@ -4166,6 +4375,27 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    inline unsigned PhysicalTemplate::find_or_convert_event(const ApEvent &evnt)
+    //--------------------------------------------------------------------------
+    {
+      std::map<ApEvent, unsigned>::const_iterator finder = event_map.find(evnt);
+      if (finder == event_map.end())
+      {
+        unsigned event_ = events.size();
+        events.push_back(evnt);
+#ifdef DEBUG_LEGION
+        assert(event_map.find(evnt) == event_map.end());
+#endif
+        event_map[evnt] = event_;
+        // Put a place holder in for the instruction until we make it
+        insert_instruction(NULL);
+        return event_;
+      }
+      else
+        return finder->second;
+    }
+
+    //--------------------------------------------------------------------------
     inline void PhysicalTemplate::insert_instruction(Instruction *inst)
     //--------------------------------------------------------------------------
     {
@@ -4223,6 +4453,27 @@ namespace Legion {
               users.insert(finder->second);
           }
         }
+    }
+
+    //--------------------------------------------------------------------------
+    void PhysicalTemplate::record_remote_memoizable(Memoizable *memo)
+    //--------------------------------------------------------------------------
+    {
+      AutoLock tpl_lock(template_lock);
+      remote_memos.push_back(memo);
+    }
+
+    //--------------------------------------------------------------------------
+    void PhysicalTemplate::release_remote_memos(void)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(!remote_memos.empty());
+#endif
+      for (std::vector<Memoizable*>::const_iterator it = 
+            remote_memos.begin(); it != remote_memos.end(); it++)
+        delete (*it);
+      remote_memos.clear();
     }
 
     /////////////////////////////////////////////////////////////
@@ -4289,7 +4540,7 @@ namespace Legion {
     {
 #ifdef DEBUG_LEGION
       assert(lhs < events.size());
-      assert(lhs < user_events.size());
+      assert(user_events.find(lhs) != user_events.end());
 #endif
     }
 
@@ -4297,7 +4548,7 @@ namespace Legion {
     void CreateApUserEvent::execute(void)
     //--------------------------------------------------------------------------
     {
-      ApUserEvent ev = Runtime::create_ap_user_event();
+      ApUserEvent ev = Runtime::create_ap_user_event(NULL);
       events[lhs] = ev;
       user_events[lhs] = ev;
     }
@@ -4324,7 +4575,6 @@ namespace Legion {
     {
 #ifdef DEBUG_LEGION
       assert(lhs < events.size());
-      assert(lhs < user_events.size());
       assert(rhs < events.size());
 #endif
     }
@@ -4338,7 +4588,7 @@ namespace Legion {
       assert(user_events[lhs].exists());
       assert(events[lhs].id == user_events[lhs].id);
 #endif
-      Runtime::trigger_event(user_events[lhs], events[rhs]);
+      Runtime::trigger_event(NULL, user_events[lhs], events[rhs]);
     }
 
     //--------------------------------------------------------------------------

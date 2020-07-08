@@ -33,7 +33,9 @@ namespace Realm {
   class atomic {
   public:
     atomic(void);
-    atomic(T _value);
+
+    // this is explicit to disallow assignment of base value (must use store())
+    explicit atomic(T _value);
 
     // copy constructors are needed if atomics are put in a container
     atomic(const atomic<T>& copy_from);
@@ -41,6 +43,8 @@ namespace Realm {
 
     T load(void) const;
     T load_acquire(void) const;
+    // a fenced load is an load_acquire that cannot be reordered with earlier stores
+    T load_fenced(void) const;
 
     void store(T newval);
     void store_release(T newval);

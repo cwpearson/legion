@@ -277,7 +277,7 @@ namespace Realm {
       GPUMemcpy3D(GPU *_gpu,
                   void *_dst, const void *_src,
                   off_t _dst_stride, off_t _src_stride,
-                  off_t _dst_height, off_t _src_height,
+                  off_t _dst_pstride, off_t _src_pstride,
                   size_t _bytes, size_t _height, size_t _depth,
                   GPUMemcpyKind _kind,
                   GPUCompletionNotification *_notification);
@@ -289,7 +289,7 @@ namespace Realm {
     protected:
       void *dst;
       const void *src;
-      off_t dst_stride, src_stride, dst_height, src_height;
+      off_t dst_stride, src_stride, dst_pstride, src_pstride;
       size_t bytes, height, depth;
       GPUCompletionNotification *notification;
     };
@@ -334,6 +334,32 @@ namespace Realm {
       void *dst;
       size_t dst_stride;
       size_t bytes, lines;
+      static const size_t MAX_DIRECT_SIZE = 8;
+      union {
+	char direct[8];
+	char *indirect;
+      } fill_data;
+      size_t fill_data_size;
+      GPUCompletionNotification *notification;
+    };
+
+    class GPUMemset3D : public GPUMemcpy {
+    public:
+      GPUMemset3D(GPU *_gpu,
+		  void *_dst, size_t _dst_stride, size_t _dst_pstride,
+		  size_t _bytes, size_t _height, size_t _depth,
+		  const void *_fill_data, size_t _fill_data_size,
+		  GPUCompletionNotification *_notification);
+
+      virtual ~GPUMemset3D(void);
+
+    public:
+      void do_span(off_t pos, size_t len);
+      virtual void execute(GPUStream *stream);
+    protected:
+      void *dst;
+      size_t dst_stride, dst_pstride;
+      size_t bytes, height, depth;
       static const size_t MAX_DIRECT_SIZE = 8;
       union {
 	char direct[8];
@@ -443,12 +469,12 @@ namespace Realm {
       void init_pool(int init_size = 0 /* default == batch size */);
       void empty_pool(void);
 
-      CUevent get_event(void);
-      void return_event(CUevent e);
+      CUevent get_event(bool external = false);
+      void return_event(CUevent e, bool external = false);
 
     protected:
       Mutex mutex;
-      int batch_size, current_size, total_size;
+      int batch_size, current_size, total_size, external_count;
       std::vector<CUevent> available_events;
     };
 
@@ -554,6 +580,12 @@ namespace Realm {
 			     const void *fill_data, size_t fill_data_size,
 			     GPUCompletionNotification *notification = 0);
 
+      void fill_within_fb_3d(off_t dst_offset, off_t dst_stride,
+			     off_t dst_height,
+			     size_t bytes, size_t height, size_t depth,
+			     const void *fill_data, size_t fill_data_size,
+			     GPUCompletionNotification *notification = 0);
+
       void fence_to_fb(Realm::Operation *op);
       void fence_from_fb(Realm::Operation *op);
       void fence_within_fb(Realm::Operation *op);
@@ -653,6 +685,11 @@ namespace Realm {
       void gpu_memcpy_async(void *dst, const void *src, size_t size,
 			    cudaMemcpyKind kind, cudaStream_t stream);
 #ifdef REALM_USE_CUDART_HIJACK
+      void gpu_memcpy2d(void *dst, size_t dpitch, const void *src, size_t spitch,
+                        size_t width, size_t height, cudaMemcpyKind kind);
+      void gpu_memcpy2d_async(void *dst, size_t dpitch, const void *src, 
+                              size_t spitch, size_t width, size_t height, 
+                              cudaMemcpyKind kind, cudaStream_t stream);
       void gpu_memcpy_to_symbol(const void *dst, const void *src, size_t size,
 				size_t offset, cudaMemcpyKind kind);
       void gpu_memcpy_to_symbol_async(const void *dst, const void *src, size_t size,

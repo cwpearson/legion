@@ -537,7 +537,7 @@ if(LEGION_CUDA_SRC)
     RELEASE -O2
     RELWITHDEBINFO -g -O2)
   target_sources(LegionRuntime PRIVATE ${LEGION_CUDA_OBJS})
-  # target_link_libraries(RealmRuntime PUBLIC nvidia-ml)
+  target_link_libraries(RealmRuntime PUBLIC nvidia-ml)
   target_link_libraries(LegionRuntime PUBLIC ${CUDA_LIBRARIES})
 endif()
 target_link_libraries(LegionRuntime PUBLIC RealmRuntime)
